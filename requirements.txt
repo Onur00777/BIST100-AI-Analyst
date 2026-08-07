@@ -1,0 +1,8 @@
+streamlit>=1.32.0
+yfinance>=0.2.40
+pandas>=2.0.0
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+# pandas-ta needs numba, which does not support Python 3.14 yet.
+# RSI/EMA fall back to manual calculations in market_data.py.
+# Optional (Python <=3.13 only): pandas-ta>=0.3.14b

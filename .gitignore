@@ -1,0 +1,8 @@
+.env
+portfolio.db
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.streamlit/secrets.toml
