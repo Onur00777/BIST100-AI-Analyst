@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 import ai_analyst
 import database as db
 import market_data as md
+import pdf_generator
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -477,7 +478,55 @@ div[data-testid="stDataFrame"] * {
 .ai-card.card-risk { border-left-color: #ef5350; }
 .ai-card.card-levels { border-left-color: #ff9800; }
 .ai-card.card-strategy { border-left-color: #ab47bc; }
+.ai-card.card-news { border-left-color: #00bcd4; }
+.ai-card.card-score { border-left-color: #ff9800; }
 .ai-card.card-default { border-left-color: #787b86; }
+
+/* Score indicator badge */
+.score-banner {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin: 0.5rem 0 1rem 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+}
+.score-banner.tone-pos { border-left: 4px solid var(--green); }
+.score-banner.tone-neg { border-left: 4px solid var(--red); }
+.score-banner.tone-flat { border-left: 4px solid var(--text-muted); }
+.score-left { display: flex; align-items: center; gap: 0.85rem; }
+.score-emoji { font-size: 1.8rem; }
+.score-meta label {
+    display: block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+    margin-bottom: 0.15rem;
+}
+.score-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.7rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1;
+}
+.score-label {
+    margin-top: 0.35rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.score-reasons {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin: 0;
+    padding-left: 1.1rem;
+}
 
 .ai-card-title {
     display: flex;
@@ -842,6 +891,10 @@ def _body_to_html(body: str) -> str:
 def _classify_section(title: str) -> tuple[str, str]:
     """Map section title -> (css_class, icon)."""
     t = title.lower()
+    if any(k in t for k in ("haber", "sektörel", "sektorel", "news")):
+        return "card-news", "📰"
+    if any(k in t for k in ("değişim puan", "degisim puan", "beklenen", "score", "puan")):
+        return "card-score", "📊"
     if any(k in t for k in ("özet", "ozet", "summary", "günlük", "portföy", "portfoy")):
         return "card-summary", "📋"
     if any(k in t for k in ("disiplin", "discipline")):
@@ -855,6 +908,39 @@ def _classify_section(title: str) -> tuple[str, str]:
     if any(k in t for k in ("strateji", "strategy", "motivasyon", "öneri", "oneri")):
         return "card-strategy", "💡"
     return "card-default", "📌"
+
+
+def render_score_banner(score_info: dict) -> None:
+    """Prominent -10..+10 expected-change score card."""
+    score = score_info.get("score")
+    meta = ai_analyst.score_badge_meta(score)
+    if score is None:
+        return
+
+    sign = f"+{score}" if score > 0 else str(score)
+    label = html.escape(score_info.get("label") or meta["title"])
+    reasons = score_info.get("reasons") or []
+    reasons_html = ""
+    if reasons:
+        items = "".join(f"<li>{html.escape(r)}</li>" for r in reasons[:3])
+        reasons_html = f"<ul class='score-reasons'>{items}</ul>"
+
+    st.markdown(
+        f"""
+        <div class="score-banner tone-{meta['tone']}">
+          <div class="score-left">
+            <div class="score-emoji">{meta['emoji']}</div>
+            <div class="score-meta">
+              <label>Beklenen Değişim Puanı</label>
+              <div class="score-value">{sign}/10</div>
+              <div class="score-label">{label}</div>
+            </div>
+          </div>
+          <div>{reasons_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_ai_report(report: str) -> None:
@@ -924,6 +1010,12 @@ def cached_bist100() -> dict:
     return md.get_bist100_index_summary()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_stock_news(ticker: str) -> dict:
+    """Cache news headlines for 5 minutes."""
+    return md.get_stock_news(ticker, limit=5)
+
+
 def fetch_market_dict(tickers: list[str]) -> dict[str, dict]:
     """Fetch cached summaries for a list of tickers (normalized, de-duplicated)."""
     result: dict[str, dict] = {}
@@ -932,6 +1024,30 @@ def fetch_market_dict(tickers: list[str]) -> dict[str, dict]:
         if bare and bare not in result:
             result[bare] = cached_stock_summary(bare)
     return result
+
+
+def fetch_news_dict(tickers: list[str]) -> dict[str, dict]:
+    """Fetch cached news for tickers."""
+    result: dict[str, dict] = {}
+    for t in tickers:
+        bare = md.bare_ticker(t)
+        if bare and bare not in result:
+            result[bare] = cached_stock_news(bare)
+    return result
+
+
+def _flatten_news(news_dict: dict[str, dict]) -> list[dict]:
+    """Flatten per-ticker news dict into a single list for the PDF."""
+    flat: list[dict] = []
+    for ticker, payload in (news_dict or {}).items():
+        for item in (payload or {}).get("news") or []:
+            row = dict(item)
+            row["ticker"] = ticker
+            title = row.get("title") or ""
+            if ticker and ticker not in title:
+                row["title"] = f"[{ticker}] {title}"
+            flat.append(row)
+    return flat
 
 
 # ---------------------------------------------------------------------------
@@ -1249,8 +1365,9 @@ with tab3:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Seçtiğiniz kapsamdaki işlemler/pozisyonlar ve canlı teknik göstergeler "
-        "Gemini Flash modeline gönderilir; Türkçe koçluk raporu üretilir."
+        "Seçtiğiniz kapsamdaki işlemler/pozisyonlar, canlı teknik göstergeler ve "
+        "sektör haberleri Gemini Flash modeline gönderilir; Türkçe koçluk raporu "
+        "ve -10…+10 beklenen değişim puanı üretilir."
     )
 
     scope = st.radio(
@@ -1276,8 +1393,17 @@ with tab3:
         clear_btn = st.button("Raporu Temizle", use_container_width=True)
 
     if clear_btn and "ai_report" in st.session_state:
-        del st.session_state["ai_report"]
-        st.session_state.pop("ai_report_scope", None)
+        for key in (
+            "ai_report",
+            "ai_report_scope",
+            "ai_report_tickers",
+            "ai_report_date",
+            "ai_report_metrics",
+            "ai_report_news",
+            "ai_report_trades",
+            "ai_score",
+        ):
+            st.session_state.pop(key, None)
         st.rerun()
 
     if analyze_btn:
@@ -1287,11 +1413,22 @@ with tab3:
                 st.warning("Analiz için en az bir açık pozisyon gerekli (önce BUY ekleyin).")
             else:
                 tickers = holdings["ticker"].tolist()
-                with st.spinner("Piyasa verileri alınıyor ve Gemini analiz ediyor..."):
+                with st.spinner(
+                    "Piyasa verileri + haberler alınıyor ve Gemini analiz ediyor..."
+                ):
                     market_dict = fetch_market_dict(tickers)
-                    report = ai_analyst.analyze_portfolio(holdings, market_dict)
+                    news_dict = fetch_news_dict(tickers)
+                    report = ai_analyst.analyze_portfolio(
+                        holdings, market_dict, news_dict=news_dict
+                    )
                 st.session_state["ai_report"] = report
                 st.session_state["ai_report_scope"] = "Tüm Aktif Portföy"
+                st.session_state["ai_report_tickers"] = tickers
+                st.session_state["ai_report_date"] = date.today().isoformat()
+                st.session_state["ai_report_metrics"] = market_dict
+                st.session_state["ai_report_news"] = news_dict
+                st.session_state["ai_report_trades"] = []
+                st.session_state["ai_score"] = ai_analyst.parse_expected_score(report)
         else:
             iso = selected_date.isoformat() if selected_date else date.today().isoformat()
             day_trades = db.get_trades_by_date(iso)
@@ -1299,28 +1436,73 @@ with tab3:
                 st.warning(f"{iso} tarihinde kayıtlı işlem yok. Farklı bir tarih seçin.")
             else:
                 tickers = day_trades["ticker"].dropna().unique().tolist()
-                with st.spinner("Piyasa verileri alınıyor ve Gemini analiz ediyor..."):
+                with st.spinner(
+                    "Piyasa verileri + haberler alınıyor ve Gemini analiz ediyor..."
+                ):
                     market_dict = fetch_market_dict(tickers)
+                    news_dict = fetch_news_dict(tickers)
                     report = ai_analyst.analyze_daily_performance(
-                        day_trades, market_dict, analysis_date=iso
+                        day_trades,
+                        market_dict,
+                        analysis_date=iso,
+                        news_dict=news_dict,
                     )
                 st.session_state["ai_report"] = report
                 st.session_state["ai_report_scope"] = f"{iso} işlemleri"
+                st.session_state["ai_report_tickers"] = tickers
+                st.session_state["ai_report_date"] = iso
+                st.session_state["ai_report_metrics"] = market_dict
+                st.session_state["ai_report_news"] = news_dict
+                st.session_state["ai_report_trades"] = day_trades.to_dict(orient="records")
+                st.session_state["ai_score"] = ai_analyst.parse_expected_score(report)
 
     if "ai_report" in st.session_state:
         scope_label = st.session_state.get("ai_report_scope", "")
         if scope_label:
             st.caption(f"Kapsam: {scope_label}")
+
+        score_info = st.session_state.get("ai_score") or ai_analyst.parse_expected_score(
+            st.session_state["ai_report"]
+        )
+        render_score_banner(score_info)
+
         st.markdown('<div class="ai-wrap">', unsafe_allow_html=True)
         render_ai_report(st.session_state["ai_report"])
         st.markdown("</div>", unsafe_allow_html=True)
+
+        # --- PDF download ---
+        tickers = st.session_state.get("ai_report_tickers") or []
+        report_date = st.session_state.get("ai_report_date") or date.today().isoformat()
+        primary_ticker = (
+            "_".join(tickers[:3]) if tickers else "PORTFOY"
+        )
+        try:
+            pdf_bytes = pdf_generator.generate_pdf_report(
+                ticker=primary_ticker,
+                report_date=report_date,
+                metrics=st.session_state.get("ai_report_metrics") or {},
+                ai_report_text=st.session_state["ai_report"],
+                trades=st.session_state.get("ai_report_trades") or [],
+                news=_flatten_news(st.session_state.get("ai_report_news") or {}),
+                score_info=score_info,
+                scope_label=scope_label,
+            )
+            st.download_button(
+                label="📄 Raporu PDF Olarak İndir",
+                data=pdf_bytes,
+                file_name=pdf_generator.pdf_filename(primary_ticker, report_date),
+                mime="application/pdf",
+                use_container_width=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"PDF oluşturulamadı: {exc}")
 
         with st.expander("Ham Markdown çıktısını göster"):
             st.markdown(st.session_state["ai_report"])
     else:
         st.markdown(
             '<div class="empty-state">Kapsamı seçip <strong>Analiz Et &amp; Yorumla</strong> '
-            "butonuna tıklayın.<br/>Sonuç; 🎯 Destek/Direnç, ⚠️ Risk Analizi ve 💡 Strateji "
-            "kartları olarak gösterilir.</div>",
+            "butonuna tıklayın.<br/>Sonuç; 📰 Haber Özeti, 📊 Beklenen Değişim Puanı (-10…+10), "
+            "🎯 Destek/Direnç ve 💡 Strateji kartları + PDF indirme olarak gösterilir.</div>",
             unsafe_allow_html=True,
         )

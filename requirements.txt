@@ -3,5 +3,6 @@ yfinance>=0.2.40
 pandas>=2.0.0
 google-genai>=1.0.0
 python-dotenv>=1.0.0
+reportlab>=4.0.0
 # Technical indicators (RSI/EMA) are computed with pure pandas in
 # market_data.py — no pandas-ta/numba needed (Python 3.10–3.14 compatible).

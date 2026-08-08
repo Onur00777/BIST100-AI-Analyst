@@ -43,7 +43,7 @@ DEFAULT_MODEL_CANDIDATES = [
 SYSTEM_INSTRUCTION = """
 You are an experienced BIST (Borsa Istanbul) trading coach and technical analyst.
 You review either a single day's trades or a cumulative portfolio with
-constructive honesty.
+constructive honesty, incorporating recent company/sector news when provided.
 
 Evaluation rules (always follow):
 1. Trading discipline: Did the trader overtrade, chase price, or ignore risk size?
@@ -53,30 +53,138 @@ Evaluation rules (always follow):
    buys into strength.
 3. Concentration risk: Highlight if too much capital or too many trades cluster
    in one ticker or a single sector theme.
-4. Tomorrow levels: For each discussed ticker (or the most important one), give
+4. News & sector context: Use provided headlines/summaries to flag positive and
+   negative developments that could move the stock near-term.
+5. Tomorrow levels: For each discussed ticker (or the most important one), give
    exactly 1 key Support and 1 key Resistance level, derived from the provided
    high_60d / low_60d / EMA / current price context.
-5. Strategy: End with one short, practical strategy suggestion.
-6. Tone: Encouraging, clear, and practical — never hype, never financial advice
-   disclaimers in every sentence. Be a calm mentor.
+6. Expected-change score: Assign ONE overall score from -10 to +10 for the
+   near-term outlook of the analyzed scope (portfolio or day), combining
+   technicals + news. Be honest; do not inflate scores.
+7. Strategy: End with one short, practical strategy suggestion.
+8. Tone: Encouraging, clear, and practical — never hype. Be a calm mentor.
 
 Language & format constraints (CRITICAL):
-- The FINAL OUTPUT MUST be entirely in simple, clear, encouraging TURKISH.
+- The FINAL OUTPUT MUST be entirely in simple, clear, encouraging TURKISH
+  EXCEPT for the mandatory machine-readable score line (see below).
 - Use clean Markdown: ## headers, bullet points, and short paragraphs.
+- ALWAYS include these sections (in addition to the review structure):
+  ## Sektörel & Şirket Haberleri Özeti
+     - Bullet key positive and negative developments from the news feed.
+  ## Beklenen Değişim Puanı
+     - First line MUST be exactly: SCORE: <integer from -10 to +10>
+       Example: SCORE: +7
+     - Second line: human label like `+7/10 - Yükseliş Beklentisi Kuvvetli`
+       or `-4/10 - Kısa Vadeli Düzeltme Baskısı`
+     - Then 2–3 short bullet reasons supporting the score.
 - Suggested structure for a daily review:
   ## Günlük Özet
   ## Disiplin Değerlendirmesi
   ## İşlem Bazlı Teknik Yorum
+  ## Sektörel & Şirket Haberleri Özeti
   ## Konsantrasyon / Risk Notu
   ## Yarın İçin Destek & Direnç
+  ## Beklenen Değişim Puanı
   ## Strateji Önerisi
 - Suggested structure for a portfolio review:
   ## Portföy Özeti
   ## Pozisyon Bazlı Teknik Yorum
+  ## Sektörel & Şirket Haberleri Özeti
   ## Konsantrasyon / Risk Notu
   ## Destek & Direnç Seviyeleri
+  ## Beklenen Değişim Puanı
   ## Strateji Önerisi
 """
+
+
+# ---------------------------------------------------------------------------
+# Score parsing (SCORE: +7 emitted by Gemini)
+# ---------------------------------------------------------------------------
+def parse_expected_score(report_text: str) -> dict[str, Any]:
+    """
+    Extract the -10..+10 expected-change score from a Gemini report.
+
+    Returns:
+        {score: int|None, label: str, reasons: list[str], success: bool}
+    """
+    result: dict[str, Any] = {
+        "score": None,
+        "label": "",
+        "reasons": [],
+        "success": False,
+    }
+    if not report_text:
+        return result
+
+    text = report_text.strip()
+
+    # Primary: SCORE: +7  / SCORE: -4  / SCORE: 3
+    m = re.search(r"(?im)^\s*SCORE\s*:\s*([+-]?\d{1,2})\s*$", text)
+    if not m:
+        # Fallback patterns inside the score section
+        m = re.search(
+            r"(?i)(?:SCORE|puan)\s*[:=]\s*([+-]?\d{1,2})\s*(?:/10)?",
+            text,
+        )
+    if not m:
+        m = re.search(r"(?m)^\s*([+-]?\d{1,2})\s*/\s*10\b", text)
+
+    if m:
+        try:
+            score = int(m.group(1))
+            score = max(-10, min(10, score))
+            result["score"] = score
+            result["success"] = True
+        except ValueError:
+            pass
+
+    # Human label near the score (e.g. "+7/10 - Yükseliş Beklentisi Kuvvetli")
+    label_m = re.search(
+        r"(?m)^\s*([+-]?\d{1,2}\s*/\s*10\s*[-–—:].+)$",
+        text,
+    )
+    if label_m:
+        result["label"] = label_m.group(1).strip()
+    elif result["score"] is not None:
+        s = result["score"]
+        if s >= 6:
+            tone = "Yükseliş Beklentisi Kuvvetli"
+        elif s >= 2:
+            tone = "Hafif Pozitif Görünüm"
+        elif s >= -1:
+            tone = "Nötr / Yatay Beklenti"
+        elif s >= -5:
+            tone = "Kısa Vadeli Düzeltme Baskısı"
+        else:
+            tone = "Güçlü Negatif Baskı"
+        sign = f"+{s}" if s > 0 else str(s)
+        result["label"] = f"{sign}/10 - {tone}"
+
+    # Pull a few bullets from the score section as reasons
+    score_section = re.search(
+        r"(?is)##\s*Beklenen Değişim Puanı\s*(.*?)(?=\n##\s|\Z)",
+        text,
+    )
+    if score_section:
+        bullets = re.findall(r"(?m)^\s*[-*•]\s+(.+)$", score_section.group(1))
+        result["reasons"] = [b.strip() for b in bullets[:3] if b.strip()]
+
+    return result
+
+
+def score_badge_meta(score: Optional[int]) -> dict[str, str]:
+    """CSS tone helpers for the UI score card."""
+    if score is None:
+        return {"tone": "flat", "emoji": "➖", "title": "Puan Yok"}
+    if score >= 6:
+        return {"tone": "pos", "emoji": "🚀", "title": "Güçlü Pozitif"}
+    if score >= 2:
+        return {"tone": "pos", "emoji": "📈", "title": "Pozitif"}
+    if score >= -1:
+        return {"tone": "flat", "emoji": "➖", "title": "Nötr"}
+    if score >= -5:
+        return {"tone": "neg", "emoji": "📉", "title": "Negatif"}
+    return {"tone": "neg", "emoji": "⚠️", "title": "Güçlü Negatif"}
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +346,41 @@ def _format_market_data(market_data_dict: dict[str, dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def _format_news(news_dict: Optional[dict[str, dict[str, Any]]]) -> str:
+    """Serialize recent headlines for Gemini (sector/company context)."""
+    if not news_dict:
+        return "No recent news available."
+
+    blocks = []
+    for ticker, payload in news_dict.items():
+        items = (payload or {}).get("news") or []
+        if not items:
+            err = (payload or {}).get("error") or "no headlines"
+            blocks.append(f"[{ticker}] NEWS: {err}")
+            continue
+        lines = [f"[{ticker}] recent news:"]
+        for i, n in enumerate(items, 1):
+            title = n.get("title") or ""
+            publisher = n.get("publisher") or ""
+            summary = n.get("summary") or ""
+            published = n.get("published") or ""
+            line = f"  {i}. {title}"
+            if publisher:
+                line += f" ({publisher})"
+            if published:
+                line += f" [{published}]"
+            lines.append(line)
+            if summary:
+                lines.append(f"     summary: {summary[:280]}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "No recent news available."
+
+
 def _build_daily_prompt(
     trades_df: pd.DataFrame,
     market_data_dict: dict[str, dict[str, Any]],
     analysis_date: Optional[str] = None,
+    news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """User prompt for a specific date's trades."""
     date_part = f" (date: {analysis_date})" if analysis_date else ""
@@ -251,14 +390,17 @@ def _build_daily_prompt(
         f"{_format_trades(trades_df)}\n\n"
         "=== MARKET / TECHNICAL SNAPSHOT ===\n"
         f"{_format_market_data(market_data_dict)}\n\n"
+        "=== RECENT COMPANY / SECTOR NEWS ===\n"
+        f"{_format_news(news_dict)}\n\n"
         "Produce the Turkish Markdown daily coaching report now "
-        "(use the daily review structure)."
+        "(use the daily review structure, including news summary and SCORE line)."
     )
 
 
 def _build_portfolio_prompt(
     holdings_df: pd.DataFrame,
     market_data_dict: dict[str, dict[str, Any]],
+    news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """User prompt for the whole active portfolio."""
     return (
@@ -268,9 +410,12 @@ def _build_portfolio_prompt(
         f"{_format_holdings(holdings_df)}\n\n"
         "=== MARKET / TECHNICAL SNAPSHOT ===\n"
         f"{_format_market_data(market_data_dict)}\n\n"
+        "=== RECENT COMPANY / SECTOR NEWS ===\n"
+        f"{_format_news(news_dict)}\n\n"
         "For each position, compare current price vs average buy price "
-        "(unrealized P/L direction), evaluate technical posture, then produce "
-        "the Turkish Markdown portfolio report (use the portfolio review structure)."
+        "(unrealized P/L direction), evaluate technical posture and news, then "
+        "produce the Turkish Markdown portfolio report "
+        "(include news summary and SCORE line)."
     )
 
 
@@ -540,6 +685,7 @@ def analyze_daily_performance(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     analysis_date: Optional[str] = None,
+    news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """
     Analyze trades from one specific date (default flow: today).
@@ -553,7 +699,9 @@ def analyze_daily_performance(
             "veya önce bir işlem ekleyin."
         )
 
-    prompt = _build_daily_prompt(trades_df, market_data_dict, analysis_date)
+    prompt = _build_daily_prompt(
+        trades_df, market_data_dict, analysis_date, news_dict=news_dict
+    )
     return _run_gemini(prompt, api_key=api_key, model=model)
 
 
@@ -562,6 +710,7 @@ def analyze_portfolio(
     market_data_dict: dict[str, dict[str, Any]],
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """
     Analyze the current cumulative portfolio (all open positions).
@@ -575,5 +724,7 @@ def analyze_portfolio(
             "Önce bir BUY işlemi ekleyin."
         )
 
-    prompt = _build_portfolio_prompt(holdings_df, market_data_dict)
+    prompt = _build_portfolio_prompt(
+        holdings_df, market_data_dict, news_dict=news_dict
+    )
     return _run_gemini(prompt, api_key=api_key, model=model)

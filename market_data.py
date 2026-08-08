@@ -312,3 +312,148 @@ def get_summaries_for_tickers(tickers: list[str]) -> dict[str, dict[str, Any]]:
             unique.append(bare)
 
     return {t: get_stock_summary(t) for t in unique}
+
+
+# ---------------------------------------------------------------------------
+# Sector / company news via yfinance
+# ---------------------------------------------------------------------------
+def _extract_news_item(raw: dict) -> Optional[dict[str, Any]]:
+    """
+    Normalize a yfinance news payload (old flat dict OR nested 'content' shape)
+    into {title, publisher, summary, link, published}.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    # Newer yfinance shape: {'id': ..., 'content': {...}}
+    content = raw.get("content") if isinstance(raw.get("content"), dict) else raw
+
+    title = (
+        content.get("title")
+        or content.get("headline")
+        or raw.get("title")
+        or ""
+    ).strip()
+    if not title:
+        return None
+
+    publisher = ""
+    provider = content.get("provider") or raw.get("provider")
+    if isinstance(provider, dict):
+        publisher = str(provider.get("displayName") or provider.get("name") or "")
+    if not publisher:
+        publisher = str(
+            content.get("publisher")
+            or raw.get("publisher")
+            or content.get("source")
+            or ""
+        )
+
+    summary = (
+        content.get("summary")
+        or content.get("description")
+        or raw.get("summary")
+        or ""
+    )
+    if isinstance(summary, str):
+        summary = summary.strip()
+    else:
+        summary = ""
+
+    # Link extraction
+    link = ""
+    click = content.get("clickThroughUrl") or content.get("canonicalUrl")
+    if isinstance(click, dict):
+        link = str(click.get("url") or "")
+    if not link:
+        link = str(content.get("link") or raw.get("link") or content.get("url") or "")
+
+    published = (
+        content.get("pubDate")
+        or content.get("displayTime")
+        or raw.get("providerPublishTime")
+        or raw.get("published")
+        or ""
+    )
+    if isinstance(published, (int, float)):
+        try:
+            from datetime import datetime, timezone
+
+            published = datetime.fromtimestamp(published, tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
+        except (OSError, OverflowError, ValueError):
+            published = str(published)
+
+    return {
+        "title": title[:240],
+        "publisher": (publisher or "Bilinmiyor")[:80],
+        "summary": (summary or "")[:500],
+        "link": link,
+        "published": str(published)[:32],
+    }
+
+
+def get_stock_news(ticker: str, limit: int = 5) -> dict[str, Any]:
+    """
+    Fetch recent news headlines for a BIST ticker via yfinance.
+
+    Returns:
+        {
+          ticker, yahoo_ticker, news: [{title, publisher, summary, link, published}],
+          success, error
+        }
+    Never raises — empty news list on failure.
+    """
+    yahoo_ticker = format_bist_ticker(ticker)
+    bare = yahoo_ticker[:-3] if yahoo_ticker.endswith(".IS") else yahoo_ticker
+    result: dict[str, Any] = {
+        "ticker": bare,
+        "yahoo_ticker": yahoo_ticker,
+        "news": [],
+        "success": False,
+        "error": None,
+    }
+
+    if not yahoo_ticker:
+        result["error"] = "Geçersiz hisse kodu."
+        return result
+
+    try:
+        stock = yf.Ticker(yahoo_ticker)
+        raw_news = getattr(stock, "news", None) or []
+        if not isinstance(raw_news, list) or not raw_news:
+            result["error"] = f"'{yahoo_ticker}' için haber bulunamadı."
+            return result
+
+        items: list[dict[str, Any]] = []
+        for raw in raw_news:
+            item = _extract_news_item(raw)
+            if item:
+                items.append(item)
+            if len(items) >= max(1, int(limit)):
+                break
+
+        if not items:
+            result["error"] = f"'{yahoo_ticker}' haberleri okunamadı."
+            return result
+
+        result["news"] = items
+        result["success"] = True
+        return result
+
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"Haberler alınamadı ({yahoo_ticker}): {exc}"
+        return result
+
+
+def get_news_for_tickers(
+    tickers: list[str], limit_per_ticker: int = 5
+) -> dict[str, dict[str, Any]]:
+    """Batch-fetch news for multiple tickers; keyed by bare ticker."""
+    out: dict[str, dict[str, Any]] = {}
+    for t in tickers:
+        bare = bare_ticker(t)
+        if bare and bare not in out:
+            out[bare] = get_stock_news(bare, limit=limit_per_ticker)
+    return out
