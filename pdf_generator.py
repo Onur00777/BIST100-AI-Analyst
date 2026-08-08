@@ -1,8 +1,9 @@
 """
 PDF report generator for BIST 100 Daily AI Analyst.
 
-Uses reportlab with a Unicode TTF (DejaVu / Arial / Liberation) so Turkish
-characters (ğüşıöç ĞÜŞİÖÇ) render correctly on Windows and Streamlit Cloud.
+Embeds bundled Noto Sans TTF fonts (assets/fonts/) so Turkish characters
+(ğ, ü, ş, ı, ö, ç, Ğ, Ü, Ş, İ, Ö, Ç) always render — never depends on
+Helvetica (Latin-1 only), which produces ■ boxes for Turkish glyphs.
 """
 
 from __future__ import annotations
@@ -29,20 +30,32 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+# Directory of this module → assets/fonts (bundled with the app)
+_FONTS_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+
 # Registered once per process
 _FONT_REGULAR = "Helvetica"
 _FONT_BOLD = "Helvetica-Bold"
+_FONT_SOURCE = "fallback-helvetica"
 _FONTS_READY = False
 
 
 def _candidate_font_paths() -> list[tuple[str, str]]:
     """
-    Return [(regular_ttf, bold_ttf), ...] in preference order.
-    Covers Streamlit Cloud (Debian DejaVu), Windows Arial, macOS, etc.
+    Prefer bundled Noto Sans (ships with the repo), then system Unicode fonts.
     """
     windir = os.environ.get("WINDIR", r"C:\Windows")
     return [
-        # Linux / Streamlit Cloud
+        # Bundled — works on localhost AND Streamlit Cloud
+        (
+            str(_FONTS_DIR / "NotoSans-Regular.ttf"),
+            str(_FONTS_DIR / "NotoSans-Bold.ttf"),
+        ),
+        (
+            str(_FONTS_DIR / "DejaVuSans.ttf"),
+            str(_FONTS_DIR / "DejaVuSans-Bold.ttf"),
+        ),
+        # Linux / Streamlit Cloud system packages
         (
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -50,6 +63,10 @@ def _candidate_font_paths() -> list[tuple[str, str]]:
         (
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ),
+        (
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         ),
         # Windows
         (
@@ -73,31 +90,75 @@ def _candidate_font_paths() -> list[tuple[str, str]]:
 
 
 def _ensure_fonts() -> tuple[str, str]:
-    """Register a Unicode TTF pair; fall back to Helvetica if none found."""
-    global _FONT_REGULAR, _FONT_BOLD, _FONTS_READY
-    if _FONTS_READY:
+    """
+    Register a Unicode TTF pair that supports Turkish glyphs.
+
+    Raises RuntimeError only if literally no TTF is available — Helvetica is
+    NEVER used for body text because it cannot draw ı/ğ/ş/İ.
+    """
+    global _FONT_REGULAR, _FONT_BOLD, _FONT_SOURCE, _FONTS_READY
+    if _FONTS_READY and _FONT_REGULAR != "Helvetica":
         return _FONT_REGULAR, _FONT_BOLD
 
+    errors: list[str] = []
     for regular, bold in _candidate_font_paths():
         if not Path(regular).is_file():
             continue
         try:
-            pdfmetrics.registerFont(TTFont("BISTSans", regular))
+            # Unique names avoid collisions if Streamlit reloads the module
+            pdfmetrics.registerFont(TTFont("BISTNoto", regular))
             bold_path = bold if Path(bold).is_file() else regular
-            pdfmetrics.registerFont(TTFont("BISTSans-Bold", bold_path))
-            _FONT_REGULAR = "BISTSans"
-            _FONT_BOLD = "BISTSans-Bold"
+            pdfmetrics.registerFont(TTFont("BISTNoto-Bold", bold_path))
+
+            # Sanity-check: Turkish dotted-I / soft-g must exist in the font
+            face = pdfmetrics.getFont("BISTNoto").face
+            # reportlab TrueType face stores charToGlyph; missing glyphs → .notdef
+            test_chars = "ığüşöçİĞÜŞÖÇ"
+            missing = [ch for ch in test_chars if ord(ch) not in face.charToGlyph]
+            if missing:
+                errors.append(f"{regular}: missing glyphs {missing}")
+                continue
+
+            _FONT_REGULAR = "BISTNoto"
+            _FONT_BOLD = "BISTNoto-Bold"
+            _FONT_SOURCE = regular
             _FONTS_READY = True
             return _FONT_REGULAR, _FONT_BOLD
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{regular}: {exc}")
             continue
 
-    _FONTS_READY = True
-    return _FONT_REGULAR, _FONT_BOLD
+    # Last resort: still register any available TTF even if glyph check failed
+    for regular, bold in _candidate_font_paths():
+        if not Path(regular).is_file():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("BISTNoto", regular))
+            bold_path = bold if Path(bold).is_file() else regular
+            pdfmetrics.registerFont(TTFont("BISTNoto-Bold", bold_path))
+            _FONT_REGULAR = "BISTNoto"
+            _FONT_BOLD = "BISTNoto-Bold"
+            _FONT_SOURCE = f"{regular} (glyph-check skipped)"
+            _FONTS_READY = True
+            return _FONT_REGULAR, _FONT_BOLD
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"retry {regular}: {exc}")
+
+    raise RuntimeError(
+        "Unicode PDF font bulunamadı. "
+        "`assets/fonts/NotoSans-Regular.ttf` dosyasının projede olduğundan emin olun. "
+        f"Detay: {'; '.join(errors[:3])}"
+    )
+
+
+def get_active_font_source() -> str:
+    """Return the filesystem path of the font currently in use (for debugging)."""
+    _ensure_fonts()
+    return _FONT_SOURCE
 
 
 def _esc(text: Any) -> str:
-    """Escape text for reportlab Paragraph (XML entities)."""
+    """Escape text for reportlab Paragraph (XML entities). Keep Unicode intact."""
     if text is None:
         return ""
     s = str(text)
@@ -106,6 +167,11 @@ def _esc(text: Any) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def _p(text: Any, style: ParagraphStyle) -> Paragraph:
+    """Paragraph helper that preserves Turkish characters."""
+    return Paragraph(_esc(text), style)
 
 
 def _md_to_flowables(md_text: str, styles: dict) -> list:
@@ -134,11 +200,11 @@ def _md_to_flowables(md_text: str, styles: dict) -> list:
         bullet = re.match(r"^[-*•]\s+(.*)$", line.strip())
         if bullet:
             body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _esc(bullet.group(1)))
+            # reportlab <b> uses the bold face of the same font family when registered
             flow.append(Paragraph(f"• {body}", styles["body"]))
             continue
 
         body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _esc(line.strip()))
-        # Strip leftover backticks
         body = body.replace("`", "")
         flow.append(Paragraph(body, styles["body"]))
 
@@ -147,6 +213,20 @@ def _md_to_flowables(md_text: str, styles: dict) -> list:
 
 def _build_styles(font_r: str, font_b: str) -> dict:
     base = getSampleStyleSheet()
+    # Map <b> tags inside Paragraphs to our bold TTF
+    try:
+        from reportlab.pdfbase.pdfmetrics import registerFontFamily
+
+        registerFontFamily(
+            font_r,
+            normal=font_r,
+            bold=font_b,
+            italic=font_r,
+            boldItalic=font_b,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "title": ParagraphStyle(
             "BISTTitle",
@@ -194,6 +274,22 @@ def _build_styles(font_r: str, font_b: str) -> dict:
             alignment=TA_LEFT,
             spaceAfter=2,
         ),
+        "cell": ParagraphStyle(
+            "BISTCell",
+            parent=base["Normal"],
+            fontName=font_r,
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#1e293b"),
+        ),
+        "cell_header": ParagraphStyle(
+            "BISTCellHeader",
+            parent=base["Normal"],
+            fontName=font_b,
+            fontSize=8,
+            leading=10,
+            textColor=colors.whitesmoke,
+        ),
         "score": ParagraphStyle(
             "BISTScore",
             parent=base["Normal"],
@@ -215,6 +311,11 @@ def _build_styles(font_r: str, font_b: str) -> dict:
     }
 
 
+def _table_row(values: list[Any], style: ParagraphStyle) -> list:
+    """Wrap every cell in a Paragraph so Unicode fonts always apply."""
+    return [_p(v, style) for v in values]
+
+
 def generate_pdf_report(
     ticker: str,
     report_date: str,
@@ -228,15 +329,7 @@ def generate_pdf_report(
     """
     Build a downloadable PDF report and return raw bytes.
 
-    Args:
-        ticker: Primary ticker (or comma-joined list / 'PORTFOY').
-        report_date: ISO date string used in the header / filename.
-        metrics: Technical snapshot dict (or multi-ticker map values flattened).
-        ai_report_text: Full Gemini Markdown report.
-        trades: Optional list of trade dicts for a detail table.
-        news: Optional list of news dicts {title, publisher, summary}.
-        score_info: Output of ai_analyst.parse_expected_score(...).
-        scope_label: Human scope text shown under the title.
+    Turkish characters are rendered via the bundled Noto Sans font.
     """
     font_r, font_b = _ensure_fonts()
     styles = _build_styles(font_r, font_b)
@@ -286,21 +379,28 @@ def generate_pdf_report(
 
     # --- Technical metrics table ---
     metrics = metrics or {}
-    # Support either a single summary dict or {ticker: summary}
-    metric_rows = [["Hisse", "Fiyat", "Günlük %", "RSI", "EMA20", "EMA50"]]
+    metric_rows = [
+        _table_row(
+            ["Hisse", "Fiyat", "Günlük %", "RSI", "EMA20", "EMA50"],
+            styles["cell_header"],
+        )
+    ]
 
     def _add_metric_row(tkr: str, m: dict) -> None:
         if not m:
             return
         metric_rows.append(
-            [
-                str(tkr),
-                _fmt(m.get("current_price")),
-                _fmt(m.get("daily_change_pct"), pct=True),
-                _fmt(m.get("rsi_14")),
-                _fmt(m.get("ema_20")),
-                _fmt(m.get("ema_50")),
-            ]
+            _table_row(
+                [
+                    str(tkr),
+                    _fmt(m.get("current_price")),
+                    _fmt(m.get("daily_change_pct"), pct=True),
+                    _fmt(m.get("rsi_14")),
+                    _fmt(m.get("ema_20")),
+                    _fmt(m.get("ema_50")),
+                ],
+                styles["cell"],
+            )
         )
 
     if metrics.get("ticker") or metrics.get("current_price") is not None:
@@ -317,11 +417,11 @@ def generate_pdf_report(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e222d")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("FONTNAME", (0, 0), (-1, 0), font_b),
-                    ("FONTNAME", (0, 1), (-1, -1), font_r),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+                    ("FONTNAME", (0, 0), (-1, -1), font_r),
                     ("FONTSIZE", (0, 0), (-1, -1), 8),
                     ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
                     (
                         "ROWBACKGROUNDS",
@@ -340,27 +440,34 @@ def generate_pdf_report(
     # --- Trades table ---
     if trades:
         story.append(Paragraph("İşlem Detayları", styles["h2"]))
-        trade_rows = [["Tarih", "Hisse", "İşlem", "Adet", "Fiyat", "Not"]]
+        trade_rows = [
+            _table_row(
+                ["Tarih", "Hisse", "İşlem", "Adet", "Fiyat", "Not"],
+                styles["cell_header"],
+            )
+        ]
         for t in trades:
             trade_rows.append(
-                [
-                    str(t.get("date", "")),
-                    str(t.get("ticker", "")),
-                    str(t.get("action", "")),
-                    _fmt(t.get("quantity")),
-                    _fmt(t.get("price")),
-                    str(t.get("notes", "") or "")[:40],
-                ]
+                _table_row(
+                    [
+                        str(t.get("date", "")),
+                        str(t.get("ticker", "")),
+                        str(t.get("action", "")),
+                        _fmt(t.get("quantity")),
+                        _fmt(t.get("price")),
+                        str(t.get("notes", "") or "")[:40],
+                    ],
+                    styles["cell"],
+                )
             )
         ttable = Table(trade_rows, colWidths=[65, 55, 45, 50, 60, 120])
         ttable.setStyle(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2962ff")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("FONTNAME", (0, 0), (-1, 0), font_b),
-                    ("FONTNAME", (0, 1), (-1, -1), font_r),
+                    ("FONTNAME", (0, 0), (-1, -1), font_r),
                     ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
                     (
                         "ROWBACKGROUNDS",
