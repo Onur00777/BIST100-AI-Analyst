@@ -1,7 +1,11 @@
 """
 BIST 100 Daily AI Analyst — Streamlit main dashboard.
 
-Modern dark financial terminal UI (TradingView / Bloomberg inspired).
+Modern dark financial terminal UI (TradingView / Bloomberg inspired):
+- Trade logging sidebar with universal BIST ticker support (codes or names)
+- KPI cards, technical indicator cards
+- Full trade history management (edit / delete any trade)
+- Scoped Gemini AI analysis (active portfolio OR a specific date's trades)
 """
 
 from __future__ import annotations
@@ -29,11 +33,15 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS — TradingView / Bloomberg dark terminal
+# Custom CSS — TradingView / Bloomberg dark terminal + Inter typography
 # ---------------------------------------------------------------------------
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
 
 :root {
     --bg-root: #131722;
@@ -53,10 +61,6 @@ CUSTOM_CSS = """
     --amber: #ff9800;
     --amber-dim: rgba(255, 152, 0, 0.12);
     --blue-dim: rgba(41, 98, 255, 0.14);
-}
-
-html, body, [class*="css"] {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 .stApp {
@@ -115,13 +119,6 @@ button[kind="headerNoPadding"] {
 [data-testid="stExpandSidebarButton"]:hover {
     border-color: var(--accent) !important;
     background: var(--bg-elevated) !important;
-}
-
-/* Sidebar expand chevron inside open sidebar */
-[data-testid="stSidebarCollapseButton"],
-section[data-testid="stSidebar"] button[kind="headerNoPadding"] {
-    visibility: visible !important;
-    opacity: 1 !important;
 }
 
 /* Sidebar panel */
@@ -290,9 +287,7 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
     color: #fff;
     margin: 0.4rem 0 0.75rem 0;
 }
-.section-title span.icon {
-    font-size: 1.05rem;
-}
+.section-title span.icon { font-size: 1.05rem; }
 
 .panel {
     background: var(--bg-panel);
@@ -386,7 +381,7 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
     display: inline-block;
     background: var(--green-dim);
     color: var(--green);
-    font-weight: 800;
+    font-weight: 700;
     font-size: 0.68rem;
     padding: 0.12rem 0.4rem;
     border-radius: 4px;
@@ -397,7 +392,7 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
     display: inline-block;
     background: var(--red-dim);
     color: var(--red);
-    font-weight: 800;
+    font-weight: 700;
     font-size: 0.68rem;
     padding: 0.12rem 0.4rem;
     border-radius: 4px;
@@ -432,7 +427,7 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
 }
 
 /* Buttons */
-.stButton > button {
+.stButton > button, .stFormSubmitButton > button {
     background: linear-gradient(135deg, #2962ff, #1e88e5) !important;
     color: #fff !important;
     border: none !important;
@@ -441,7 +436,7 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
     letter-spacing: 0.01em;
     transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
-.stButton > button:hover {
+.stButton > button:hover, .stFormSubmitButton > button:hover {
     transform: translateY(-1px);
     box-shadow: 0 6px 18px rgba(41,98,255,0.4) !important;
     color: #fff !important;
@@ -481,7 +476,7 @@ div[data-testid="stDataFrame"] * {
 .ai-card.card-technical { border-left-color: #42a5f5; }
 .ai-card.card-risk { border-left-color: #ef5350; }
 .ai-card.card-levels { border-left-color: #ff9800; }
-.ai-card.card-motivation { border-left-color: #ab47bc; }
+.ai-card.card-strategy { border-left-color: #ab47bc; }
 .ai-card.card-default { border-left-color: #787b86; }
 
 .ai-card-title {
@@ -515,13 +510,6 @@ div[data-testid="stDataFrame"] * {
     color: var(--text-secondary);
 }
 
-.toolbar {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    margin-bottom: 0.75rem;
-}
-
 @media (max-width: 900px) {
     .kpi-row { grid-template-columns: 1fr; }
     .tech-grid { grid-template-columns: repeat(2, 1fr); }
@@ -533,7 +521,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Formatting helpers
 # ---------------------------------------------------------------------------
 def _fmt_price(value) -> str:
     if value is None:
@@ -568,11 +556,21 @@ def _rsi_class(rsi) -> str:
     return "warn"
 
 
+def _parse_iso_date(value: str) -> date:
+    """Parse an ISO date string, falling back to today on bad data."""
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return date.today()
+
+
+# ---------------------------------------------------------------------------
+# UI building blocks
+# ---------------------------------------------------------------------------
 def render_sidebar_toggle_button() -> None:
     """
     Reliable sidebar toggle: HTML button lives in the component iframe and
     clicks Streamlit's native expand/collapse controls in the parent document.
-    (st.button + post-rerun JS injection is unreliable.)
     """
     components.html(
         """
@@ -626,7 +624,6 @@ def render_sidebar_toggle_button() -> None:
               const el = doc.querySelector(sel);
               if (el) return el;
             }
-            // Aria-label fallback (locale-agnostic-ish)
             const buttons = Array.from(doc.querySelectorAll('button'));
             return buttons.find((b) => {
               const label = (b.getAttribute('aria-label') || '').toLowerCase();
@@ -638,11 +635,7 @@ def render_sidebar_toggle_button() -> None:
           function toggleSidebar() {
             const doc = window.parent.document;
             const btn = findToggle(doc);
-            if (btn) {
-              btn.click();
-              return;
-            }
-            // Last resort: keyboard shortcut Streamlit uses for sidebar ([)
+            if (btn) { btn.click(); return; }
             try {
               doc.dispatchEvent(new KeyboardEvent('keydown', {
                 key: '[', code: 'BracketLeft', keyCode: 219, which: 219, bubbles: true
@@ -650,11 +643,11 @@ def render_sidebar_toggle_button() -> None:
             } catch (e) {}
           }
 
-          const button = document.getElementById('bist-sidebar-toggle');
-          button.addEventListener('click', function (e) {
-            e.preventDefault();
-            toggleSidebar();
-          });
+          document.getElementById('bist-sidebar-toggle')
+            .addEventListener('click', function (e) {
+              e.preventDefault();
+              toggleSidebar();
+            });
         })();
         </script>
         """,
@@ -663,7 +656,7 @@ def render_sidebar_toggle_button() -> None:
 
 
 def style_trades_table(df: pd.DataFrame):
-    """Apply green/red action coloring to the trades dataframe."""
+    """Apply green/red action coloring to a trades dataframe."""
     def color_action(val):
         v = str(val).upper()
         if v == "BUY":
@@ -672,17 +665,41 @@ def style_trades_table(df: pd.DataFrame):
             return "color: #ef5350; font-weight: 700; background-color: rgba(239,83,80,0.12);"
         return ""
 
-    styler = (
+    fmt: dict = {}
+    if "Fiyat" in df.columns:
+        fmt["Fiyat"] = "{:,.2f}"
+    if "Adet" in df.columns:
+        fmt["Adet"] = "{:g}"
+
+    return (
         df.style
         .map(color_action, subset=["İşlem"] if "İşlem" in df.columns else [])
-        .format({"Fiyat": "{:,.2f}", "Adet": "{:g}"}, na_rep="—")
+        .format(fmt, na_rep="—")
         .set_properties(**{
             "background-color": "#1e222d",
             "color": "#d1d4dc",
             "border-color": "#2a2e39",
         })
     )
-    return styler
+
+
+def show_trades_df(df: pd.DataFrame) -> None:
+    """Render a trades dataframe with styling and a safe fallback."""
+    try:
+        st.dataframe(style_trades_table(df), use_container_width=True, hide_index=True)
+    except Exception:  # noqa: BLE001 — Styler edge cases on some pandas builds
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+TRADE_COLUMN_LABELS = {
+    "id": "ID",
+    "date": "Tarih",
+    "ticker": "Hisse",
+    "action": "İşlem",
+    "quantity": "Adet",
+    "price": "Fiyat",
+    "notes": "Not",
+}
 
 
 def render_kpi_row(trade_count: int, active_positions: int, bist: dict) -> None:
@@ -690,39 +707,42 @@ def render_kpi_row(trade_count: int, active_positions: int, bist: dict) -> None:
     bist_ok = bist.get("success")
     delta = bist.get("daily_change_pct") if bist_ok else None
     trend_class = _change_class(delta)
-    kpi_trend = {
-        "pos": "kpi-up",
-        "neg": "kpi-down",
-        "flat": "kpi-flat",
-    }.get(trend_class, "kpi-flat")
+    kpi_trend = {"pos": "kpi-up", "neg": "kpi-down", "flat": "kpi-flat"}.get(
+        trend_class, "kpi-flat"
+    )
 
     if bist_ok:
         bist_value = _fmt_price(bist.get("current_price"))
         bist_sub = f'<div class="kpi-sub {trend_class}">{_fmt_pct(delta)} günlük</div>'
     else:
         bist_value = "Veri yok"
-        bist_sub = f'<div class="kpi-sub flat">{html.escape(str(bist.get("error") or "Endeks alınamadı"))}</div>'
+        bist_sub = (
+            f'<div class="kpi-sub flat">'
+            f'{html.escape(str(bist.get("error") or "Endeks alınamadı"))}</div>'
+        )
 
-    html_block = f"""
-    <div class="kpi-row">
-      <div class="kpi-card kpi-blue">
-        <div class="kpi-label">Bugünün İşlem Sayısı</div>
-        <div class="kpi-value">{trade_count}</div>
-        <div class="kpi-sub flat">bugün kaydedilen</div>
-      </div>
-      <div class="kpi-card kpi-teal">
-        <div class="kpi-label">Aktif Pozisyonlar</div>
-        <div class="kpi-value">{active_positions}</div>
-        <div class="kpi-sub flat">açık net lot</div>
-      </div>
-      <div class="kpi-card {kpi_trend}">
-        <div class="kpi-label">BIST 100 Trend</div>
-        <div class="kpi-value">{bist_value}</div>
-        {bist_sub}
-      </div>
-    </div>
-    """
-    st.markdown(html_block, unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="kpi-row">
+          <div class="kpi-card kpi-blue">
+            <div class="kpi-label">Bugünün İşlem Sayısı</div>
+            <div class="kpi-value">{trade_count}</div>
+            <div class="kpi-sub flat">bugün kaydedilen</div>
+          </div>
+          <div class="kpi-card kpi-teal">
+            <div class="kpi-label">Aktif Pozisyonlar</div>
+            <div class="kpi-value">{active_positions}</div>
+            <div class="kpi-sub flat">açık net pozisyon</div>
+          </div>
+          <div class="kpi-card {kpi_trend}">
+            <div class="kpi-label">BIST 100 Trend</div>
+            <div class="kpi-value">{bist_value}</div>
+            {bist_sub}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_tech_card(summary: dict) -> None:
@@ -735,45 +755,50 @@ def render_tech_card(summary: dict) -> None:
     rsi = summary.get("rsi_14")
     chip_cls = _change_class(change)
 
-    card = f"""
-    <div class="tech-card">
-        <div class="tech-card-head">
-            <h3>{html.escape(str(summary['ticker']))}</h3>
-            <span class="chip {chip_cls}">{_fmt_pct(change)}</span>
+    st.markdown(
+        f"""
+        <div class="tech-card">
+            <div class="tech-card-head">
+                <h3>{html.escape(str(summary['ticker']))}</h3>
+                <span class="chip {chip_cls}">{_fmt_pct(change)}</span>
+            </div>
+            <div class="tech-grid">
+                <div class="tech-item">
+                    <label>Son Fiyat</label>
+                    <span>{_fmt_price(summary.get('current_price'))} ₺</span>
+                </div>
+                <div class="tech-item">
+                    <label>Günlük %</label>
+                    <span class="{chip_cls}">{_fmt_pct(change)}</span>
+                </div>
+                <div class="tech-item">
+                    <label>RSI (14)</label>
+                    <span class="{_rsi_class(rsi)}">{rsi if rsi is not None else '—'}</span>
+                </div>
+                <div class="tech-item">
+                    <label>EMA 20</label>
+                    <span>{_fmt_price(summary.get('ema_20'))}</span>
+                </div>
+                <div class="tech-item">
+                    <label>EMA 50</label>
+                    <span>{_fmt_price(summary.get('ema_50'))}</span>
+                </div>
+                <div class="tech-item">
+                    <label>60G Aralık</label>
+                    <span>{_fmt_price(summary.get('low_60d'))} – {_fmt_price(summary.get('high_60d'))}</span>
+                </div>
+            </div>
         </div>
-        <div class="tech-grid">
-            <div class="tech-item">
-                <label>Son Fiyat</label>
-                <span>{_fmt_price(summary.get('current_price'))} ₺</span>
-            </div>
-            <div class="tech-item">
-                <label>Günlük %</label>
-                <span class="{chip_cls}">{_fmt_pct(change)}</span>
-            </div>
-            <div class="tech-item">
-                <label>RSI (14)</label>
-                <span class="{_rsi_class(rsi)}">{rsi if rsi is not None else '—'}</span>
-            </div>
-            <div class="tech-item">
-                <label>EMA 20</label>
-                <span>{_fmt_price(summary.get('ema_20'))}</span>
-            </div>
-            <div class="tech-item">
-                <label>EMA 50</label>
-                <span>{_fmt_price(summary.get('ema_50'))}</span>
-            </div>
-            <div class="tech-item">
-                <label>60G Aralık</label>
-                <span>{_fmt_price(summary.get('low_60d'))} – {_fmt_price(summary.get('high_60d'))}</span>
-            </div>
-        </div>
-    </div>
-    """
-    st.markdown(card, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
 
+# ---------------------------------------------------------------------------
+# AI report rendering (markdown -> structured alert cards)
+# ---------------------------------------------------------------------------
 def _inline_md(text: str) -> str:
-    """Minimal inline markdown → HTML (bold / code / escape)."""
+    """Minimal inline markdown -> HTML (bold / code / escape)."""
     text = html.escape(text)
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
@@ -806,7 +831,6 @@ def _body_to_html(body: str) -> str:
             if in_list:
                 parts.append("</ul>")
                 in_list = False
-            # skip nested markdown headers inside body
             cleaned = re.sub(r"^#{1,6}\s*", "", line.strip())
             parts.append(f"<p>{_inline_md(cleaned)}</p>")
 
@@ -816,38 +840,35 @@ def _body_to_html(body: str) -> str:
 
 
 def _classify_section(title: str) -> tuple[str, str]:
-    """Map section title → (css_class, icon)."""
+    """Map section title -> (css_class, icon)."""
     t = title.lower()
-    if any(k in t for k in ("özet", "ozet", "summary", "günlük")):
+    if any(k in t for k in ("özet", "ozet", "summary", "günlük", "portföy", "portfoy")):
         return "card-summary", "📋"
     if any(k in t for k in ("disiplin", "discipline")):
         return "card-discipline", "✅"
-    if any(k in t for k in ("teknik", "işlem", "islem", "yorum")):
+    if any(k in t for k in ("teknik", "işlem", "islem", "pozisyon", "yorum")):
         return "card-technical", "📈"
     if any(k in t for k in ("risk", "konsantrasyon", "concentration")):
         return "card-risk", "⚠️"
     if any(k in t for k in ("destek", "direnç", "direnc", "seviye", "yarın", "yarin")):
         return "card-levels", "🎯"
-    if any(k in t for k in ("motivasyon", "motivation", "cümle", "cumle")):
-        return "card-motivation", "💡"
+    if any(k in t for k in ("strateji", "strategy", "motivasyon", "öneri", "oneri")):
+        return "card-strategy", "💡"
     return "card-default", "📌"
 
 
 def render_ai_report(report: str) -> None:
     """
     Parse Gemini Markdown into structured alert cards.
-    Falls back to a single panel if no ## headers are found.
+    Falls back to a single panel if no headers are found.
     """
     if not report or not report.strip():
         st.info("Rapor boş geldi.")
         return
 
-    # Split on markdown H2/H1 headers
     chunks = re.split(r"(?m)^(#{1,3})\s+(.+)$", report.strip())
 
-    # re.split with groups → [preamble, hashes, title, body, hashes, title, body, ...]
     if len(chunks) < 4:
-        # No headers — wrap whole report
         st.markdown(
             f"""
             <div class="ai-card card-summary">
@@ -871,18 +892,15 @@ def render_ai_report(report: str) -> None:
             unsafe_allow_html=True,
         )
 
-    # Iterate triples: (hashes, title, body)
     i = 1
     while i + 2 < len(chunks):
         title = chunks[i + 1].strip()
         body = chunks[i + 2].strip()
         css_cls, icon = _classify_section(title)
-        # Prefer domain icons over generic when title already has emoji-ish meaning
-        display_title = title
         st.markdown(
             f"""
             <div class="ai-card {css_cls}">
-              <div class="ai-card-title">{icon} {html.escape(display_title)}</div>
+              <div class="ai-card-title">{icon} {html.escape(title)}</div>
               <div class="ai-card-body">{_body_to_html(body)}</div>
             </div>
             """,
@@ -891,6 +909,9 @@ def render_ai_report(report: str) -> None:
         i += 3
 
 
+# ---------------------------------------------------------------------------
+# Cached market data fetchers
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_stock_summary(ticker: str) -> dict:
     """Cache market summaries for 5 minutes to reduce Yahoo rate limits."""
@@ -901,6 +922,16 @@ def cached_stock_summary(ticker: str) -> dict:
 def cached_bist100() -> dict:
     """Cache BIST 100 index snapshot for 5 minutes."""
     return md.get_bist100_index_summary()
+
+
+def fetch_market_dict(tickers: list[str]) -> dict[str, dict]:
+    """Fetch cached summaries for a list of tickers (normalized, de-duplicated)."""
+    result: dict[str, dict] = {}
+    for t in tickers:
+        bare = md.bare_ticker(t)
+        if bare and bare not in result:
+            result[bare] = cached_stock_summary(bare)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -924,9 +955,10 @@ with st.sidebar:
             ticker_input = st.selectbox("Hisse", options=md.BIST100_TICKERS, index=0)
         else:
             ticker_input = st.text_input(
-                "Hisse Kodu",
-                placeholder="örn. THYAO",
-                help="`.IS` eklemenize gerek yok — otomatik eklenir.",
+                "Hisse Kodu veya Adı",
+                placeholder="örn. THYAO veya Alcatel",
+                help="Kod ya da şirket adı yazın — `.IS` otomatik eklenir "
+                     "(Alcatel → ALCTL.IS).",
             )
 
         action = st.selectbox(
@@ -943,9 +975,9 @@ with st.sidebar:
         submitted = st.form_submit_button("Kaydet", use_container_width=True)
 
         if submitted:
-            clean_ticker = (ticker_input or "").strip().upper().replace(".IS", "")
+            clean_ticker = md.bare_ticker(ticker_input or "")
             if not clean_ticker:
-                st.error("Lütfen geçerli bir hisse kodu girin.")
+                st.error("Lütfen geçerli bir hisse kodu veya adı girin.")
             else:
                 try:
                     trade_id = db.add_trade(
@@ -957,18 +989,17 @@ with st.sidebar:
                         notes=notes.strip(),
                     )
                     st.success(f"#{trade_id} kaydedildi: {action} {clean_ticker}")
-                    st.cache_data.clear()
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"Kayıt hatası: {exc}")
 
     st.markdown("---")
     st.markdown("### 🗓️ Bugünün İşlemleri")
 
-    todays = db.get_todays_trades()
-    if todays.empty:
+    todays_sidebar = db.get_todays_trades()
+    if todays_sidebar.empty:
         st.caption("Bugün henüz işlem yok.")
     else:
-        for _, row in todays.iterrows():
+        for _, row in todays_sidebar.iterrows():
             badge = "badge-buy" if row["action"] == "BUY" else "badge-sell"
             st.markdown(
                 f"""
@@ -982,18 +1013,18 @@ with st.sidebar:
                 """,
                 unsafe_allow_html=True,
             )
-            if st.button("Sil", key=f"del_{row['id']}", help="Bu işlemi sil"):
+            if st.button("Sil", key=f"sb_del_{row['id']}", help="Bu işlemi sil"):
                 db.delete_trade(int(row["id"]))
                 st.rerun()
 
     st.markdown("---")
-    holdings = db.get_current_holdings()
+    holdings_sidebar = db.get_current_holdings()
     st.markdown("### 📦 Açık Pozisyonlar")
-    if holdings.empty:
+    if holdings_sidebar.empty:
         st.caption("Aktif pozisyon yok.")
     else:
         st.dataframe(
-            holdings.rename(
+            holdings_sidebar.rename(
                 columns={
                     "ticker": "Hisse",
                     "quantity": "Adet",
@@ -1007,7 +1038,7 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Main page
+# Main page — header + KPI row
 # ---------------------------------------------------------------------------
 top_l, top_r = st.columns([5, 1])
 with top_l:
@@ -1031,20 +1062,23 @@ with top_r:
     st.caption("Sol paneli aç / kapat")
     render_sidebar_toggle_button()
 
-# --- Summary KPIs ---
 todays_trades = db.get_todays_trades()
 active_positions = db.count_active_positions()
 bist = cached_bist100()
 render_kpi_row(len(todays_trades), active_positions, bist)
 
-# --- Tabs ---
-tab1, tab2 = st.tabs(
+# ---------------------------------------------------------------------------
+# Tabs
+# ---------------------------------------------------------------------------
+tab1, tab2, tab3 = st.tabs(
     [
         "📊 Bugünün İşlemleri & Teknik Durum",
+        "📜 Tüm İşlem Geçmişi & Yönetim",
         "🤖 AI Analiz Raporu",
     ]
 )
 
+# ============================ TAB 1 — Today ================================
 with tab1:
     st.markdown(
         '<div class="section-title"><span class="icon">📒</span> Bugün Kaydedilen İşlemler</div>',
@@ -1059,25 +1093,7 @@ with tab1:
             unsafe_allow_html=True,
         )
     else:
-        display_df = todays_trades.copy().rename(
-            columns={
-                "id": "ID",
-                "date": "Tarih",
-                "ticker": "Hisse",
-                "action": "İşlem",
-                "quantity": "Adet",
-                "price": "Fiyat",
-                "notes": "Not",
-            }
-        )
-        try:
-            st.dataframe(
-                style_trades_table(display_df),
-                use_container_width=True,
-                hide_index=True,
-            )
-        except Exception:  # noqa: BLE001 — Styler edge cases on some pandas builds
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        show_trades_df(todays_trades.rename(columns=TRADE_COLUMN_LABELS))
 
     st.markdown(
         '<div class="section-title" style="margin-top:1.1rem">'
@@ -1097,46 +1113,204 @@ with tab1:
         st.caption("Teknik kartlar için bugün işlem yapın veya açık pozisyon bulundurun.")
     else:
         with st.spinner("Piyasa verileri çekiliyor..."):
-            summaries = {t: cached_stock_summary(t) for t in tickers_to_show}
+            summaries = fetch_market_dict(tickers_to_show)
 
         cols = st.columns(2)
-        for i, ticker in enumerate(tickers_to_show):
+        for i, (ticker, summary) in enumerate(summaries.items()):
             with cols[i % 2]:
-                render_tech_card(summaries[ticker])
+                render_tech_card(summary)
 
+# ==================== TAB 2 — Full history & management ====================
 with tab2:
     st.markdown(
-        '<div class="section-title"><span class="icon">🤖</span> Gemini AI Günlük Analiz</div>',
+        '<div class="section-title"><span class="icon">📜</span> Tüm İşlem Geçmişi</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Flash message from the previous update/delete action (survives rerun)
+    flash = st.session_state.pop("_mgmt_flash", None)
+    if flash:
+        level, message = flash
+        (st.success if level == "success" else st.error)(message)
+
+    all_trades = db.get_all_trades()
+
+    if all_trades.empty:
+        st.markdown(
+            '<div class="empty-state">Henüz hiç işlem kaydı yok. '
+            "Soldaki panelden ilk işleminizi ekleyin.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        show_trades_df(all_trades.rename(columns=TRADE_COLUMN_LABELS))
+
+        st.markdown(
+            '<div class="section-title" style="margin-top:1.1rem">'
+            '<span class="icon">🛠️</span> İşlem Düzenle / Sil</div>',
+            unsafe_allow_html=True,
+        )
+
+        id_options = all_trades["id"].tolist()
+        label_by_id = {
+            int(row["id"]): (
+                f"#{int(row['id'])} · {row['date']} · {row['action']} "
+                f"{row['ticker']} · {row['quantity']:g} × {_fmt_price(row['price'])} ₺"
+            )
+            for _, row in all_trades.iterrows()
+        }
+
+        selected_id = st.selectbox(
+            "Düzenlenecek / silinecek işlemi seçin",
+            options=id_options,
+            format_func=lambda i: label_by_id.get(int(i), f"#{i}"),
+        )
+
+        trade = db.get_trade_by_id(int(selected_id)) if selected_id is not None else None
+
+        if trade is None:
+            st.warning("Seçilen işlem bulunamadı. Sayfayı yenileyin.")
+        else:
+            # Key the form by trade id so defaults refresh when selection changes
+            with st.form(f"edit_form_{trade['id']}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    e_date = st.date_input("Tarih", value=_parse_iso_date(trade["date"]))
+                    e_ticker = st.text_input(
+                        "Hisse Kodu veya Adı",
+                        value=str(trade["ticker"]),
+                        help="Kod ya da şirket adı — otomatik normalize edilir.",
+                    )
+                    e_action = st.selectbox(
+                        "İşlem",
+                        options=["BUY", "SELL"],
+                        index=0 if str(trade["action"]).upper() == "BUY" else 1,
+                        format_func=lambda x: "AL (BUY)" if x == "BUY" else "SAT (SELL)",
+                    )
+                with c2:
+                    e_quantity = st.number_input(
+                        "Adet", min_value=0.01, value=float(trade["quantity"]), step=1.0
+                    )
+                    e_price = st.number_input(
+                        "Birim Fiyat (₺)",
+                        min_value=0.01,
+                        value=float(trade["price"]),
+                        step=0.01,
+                        format="%.4f",
+                    )
+                    e_notes = st.text_input("Not", value=str(trade["notes"] or ""))
+
+                bc1, bc2 = st.columns(2)
+                update_clicked = bc1.form_submit_button(
+                    "💾 Güncelle", use_container_width=True
+                )
+                delete_clicked = bc2.form_submit_button(
+                    "🗑️ Sil", use_container_width=True
+                )
+
+            if update_clicked:
+                try:
+                    normalized = md.bare_ticker(e_ticker)
+                    if not normalized:
+                        raise ValueError("Geçerli bir hisse kodu girin.")
+                    ok = db.update_trade(
+                        int(trade["id"]),
+                        e_date.isoformat(),
+                        normalized,
+                        e_action,
+                        float(e_quantity),
+                        float(e_price),
+                        e_notes.strip(),
+                    )
+                    st.session_state["_mgmt_flash"] = (
+                        ("success", f"#{trade['id']} güncellendi ({normalized}).")
+                        if ok
+                        else ("error", f"#{trade['id']} bulunamadı — güncellenemedi.")
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state["_mgmt_flash"] = ("error", f"Güncelleme hatası: {exc}")
+                st.rerun()
+
+            if delete_clicked:
+                try:
+                    ok = db.delete_trade(int(trade["id"]))
+                    st.session_state["_mgmt_flash"] = (
+                        ("success", f"#{trade['id']} silindi.")
+                        if ok
+                        else ("error", f"#{trade['id']} bulunamadı — silinemedi.")
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state["_mgmt_flash"] = ("error", f"Silme hatası: {exc}")
+                st.rerun()
+
+# ========================= TAB 3 — AI analysis =============================
+with tab3:
+    st.markdown(
+        '<div class="section-title"><span class="icon">🤖</span> Gemini AI Analiz</div>',
         unsafe_allow_html=True,
     )
     st.caption(
-        "Bugünkü işlemleriniz ve teknik göstergeler Gemini Flash modeline "
-        "gönderilir; Türkçe koçluk raporu üretilir."
+        "Seçtiğiniz kapsamdaki işlemler/pozisyonlar ve canlı teknik göstergeler "
+        "Gemini Flash modeline gönderilir; Türkçe koçluk raporu üretilir."
     )
+
+    scope = st.radio(
+        "Analiz kapsamı",
+        options=["Tüm Aktif Portföy", "Belirli Tarihteki İşlemler"],
+        horizontal=True,
+    )
+
+    selected_date = None
+    if scope == "Belirli Tarihteki İşlemler":
+        selected_date = st.date_input(
+            "Analiz edilecek tarih",
+            value=date.today(),
+            help="Dünü veya geçmiş herhangi bir günü seçebilirsiniz.",
+        )
 
     b1, b2, _ = st.columns([2, 1, 3])
     with b1:
-        analyze_btn = st.button("Günü Analiz Et & Yorumla", type="primary", use_container_width=True)
+        analyze_btn = st.button(
+            "Analiz Et & Yorumla", type="primary", use_container_width=True
+        )
     with b2:
         clear_btn = st.button("Raporu Temizle", use_container_width=True)
 
     if clear_btn and "ai_report" in st.session_state:
         del st.session_state["ai_report"]
-        st.session_state.pop("ai_report_tickers", None)
+        st.session_state.pop("ai_report_scope", None)
         st.rerun()
 
     if analyze_btn:
-        if todays_trades.empty:
-            st.warning("Analiz için bugün en az bir işlem kaydı gerekli.")
+        if scope == "Tüm Aktif Portföy":
+            holdings = db.get_current_holdings()
+            if holdings.empty:
+                st.warning("Analiz için en az bir açık pozisyon gerekli (önce BUY ekleyin).")
+            else:
+                tickers = holdings["ticker"].tolist()
+                with st.spinner("Piyasa verileri alınıyor ve Gemini analiz ediyor..."):
+                    market_dict = fetch_market_dict(tickers)
+                    report = ai_analyst.analyze_portfolio(holdings, market_dict)
+                st.session_state["ai_report"] = report
+                st.session_state["ai_report_scope"] = "Tüm Aktif Portföy"
         else:
-            tickers = todays_trades["ticker"].dropna().unique().tolist()
-            with st.spinner("Piyasa verileri alınıyor ve Gemini analiz ediyor..."):
-                market_dict = {t: cached_stock_summary(t) for t in tickers}
-                report = ai_analyst.analyze_daily_performance(todays_trades, market_dict)
-            st.session_state["ai_report"] = report
-            st.session_state["ai_report_tickers"] = tickers
+            iso = selected_date.isoformat() if selected_date else date.today().isoformat()
+            day_trades = db.get_trades_by_date(iso)
+            if day_trades.empty:
+                st.warning(f"{iso} tarihinde kayıtlı işlem yok. Farklı bir tarih seçin.")
+            else:
+                tickers = day_trades["ticker"].dropna().unique().tolist()
+                with st.spinner("Piyasa verileri alınıyor ve Gemini analiz ediyor..."):
+                    market_dict = fetch_market_dict(tickers)
+                    report = ai_analyst.analyze_daily_performance(
+                        day_trades, market_dict, analysis_date=iso
+                    )
+                st.session_state["ai_report"] = report
+                st.session_state["ai_report_scope"] = f"{iso} işlemleri"
 
     if "ai_report" in st.session_state:
+        scope_label = st.session_state.get("ai_report_scope", "")
+        if scope_label:
+            st.caption(f"Kapsam: {scope_label}")
         st.markdown('<div class="ai-wrap">', unsafe_allow_html=True)
         render_ai_report(st.session_state["ai_report"])
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1145,7 +1319,8 @@ with tab2:
             st.markdown(st.session_state["ai_report"])
     else:
         st.markdown(
-            '<div class="empty-state">Rapor üretmek için <strong>Günü Analiz Et &amp; Yorumla</strong> '
-            "butonuna tıklayın.<br/>Sonuç; Destek/Direnç, Risk ve Disiplin kartları olarak gösterilir.</div>",
+            '<div class="empty-state">Kapsamı seçip <strong>Analiz Et &amp; Yorumla</strong> '
+            "butonuna tıklayın.<br/>Sonuç; 🎯 Destek/Direnç, ⚠️ Risk Analizi ve 💡 Strateji "
+            "kartları olarak gösterilir.</div>",
             unsafe_allow_html=True,
         )

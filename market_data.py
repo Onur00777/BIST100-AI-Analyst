@@ -1,8 +1,11 @@
 """
 Market data helpers for BIST stocks via yfinance.
 
-Fetches recent price history and computes key technical indicators
-(RSI-14, EMA-20, EMA-50) used by the dashboard and AI analyst.
+- Universal ticker normalization (`format_bist_ticker`): accepts any BIST code
+  or common company name (e.g. 'Alcatel' -> 'ALCTL.IS') and appends '.IS'.
+- Technical indicators (RSI-14, EMA-20, EMA-50, daily % change) are computed
+  with pure pandas for full Python 3.10–3.14 compatibility.
+- Every fetch failure returns a graceful fallback dict instead of raising.
 """
 
 from __future__ import annotations
@@ -12,15 +15,6 @@ from typing import Any, Optional
 import pandas as pd
 import yfinance as yf
 
-# Try pandas-ta first; fall back to manual calculations if unavailable
-try:
-    import pandas_ta as ta
-
-    HAS_PANDAS_TA = True
-except ImportError:
-    HAS_PANDAS_TA = False
-
-
 # Popular BIST 100 tickers for dropdown convenience
 BIST100_TICKERS = [
     "THYAO", "GARAN", "AKBNK", "ISCTR", "YKBNK", "SAHOL", "KCHOL",
@@ -28,20 +22,112 @@ BIST100_TICKERS = [
     "PGSUS", "FROTO", "TOASO", "SASA", "PETKM", "HEKTS", "ENKAI",
     "TAVHL", "DOHOL", "EKGYO", "VESTL", "MGROS", "ARCLK", "KRDMD",
     "HALKB", "VAKBN", "TTKOM", "ULKER", "CCOLA", "SOKM", "GUBRF",
+    "ALCTL",
 ]
 
+# Common company names -> BIST ticker codes (keys are ASCII-uppercased)
+COMMON_NAME_MAP = {
+    "ALCATEL": "ALCTL",
+    "ALCATEL LUCENT": "ALCTL",
+    "ALCATEL-LUCENT": "ALCTL",
+    "ASELSAN": "ASELS",
+    "TURKCELL": "TCELL",
+    "GARANTI": "GARAN",
+    "GARANTI BBVA": "GARAN",
+    "AKBANK": "AKBNK",
+    "IS BANKASI": "ISCTR",
+    "ISBANK": "ISCTR",
+    "THY": "THYAO",
+    "TURK HAVA YOLLARI": "THYAO",
+    "TURKISH AIRLINES": "THYAO",
+    "SISECAM": "SISE",
+    "EREGLI": "EREGL",
+    "TUPRAS": "TUPRS",
+    "BIM": "BIMAS",
+    "PEGASUS": "PGSUS",
+    "FORD OTOSAN": "FROTO",
+    "TOFAS": "TOASO",
+    "KOC HOLDING": "KCHOL",
+    "SABANCI": "SAHOL",
+    "SABANCI HOLDING": "SAHOL",
+    "ARCELIK": "ARCLK",
+    "VESTEL": "VESTL",
+    "HALKBANK": "HALKB",
+    "VAKIFBANK": "VAKBN",
+    "YAPI KREDI": "YKBNK",
+    "MIGROS": "MGROS",
+    "ULKER": "ULKER",
+    "COCA COLA": "CCOLA",
+    "COCA-COLA ICECEK": "CCOLA",
+    "TURK TELEKOM": "TTKOM",
+}
 
+# Turkish characters -> ASCII equivalents for robust name matching
+_TR_TRANSLATION = str.maketrans(
+    "çÇğĞıİöÖşŞüÜ",
+    "cCgGiIoOsSuU",
+)
+
+
+def _ascii_upper(text: str) -> str:
+    """Uppercase text and fold Turkish characters to ASCII."""
+    return (text or "").translate(_TR_TRANSLATION).upper().strip()
+
+
+def format_bist_ticker(ticker: str) -> str:
+    """
+    Normalize any user input into a Yahoo Finance BIST symbol ('XXX.IS').
+
+    Steps:
+      1. Trim spaces, uppercase, fold Turkish characters.
+      2. Map common company names (e.g. 'ALCATEL' -> 'ALCTL').
+      3. Append '.IS' when missing.
+
+    Examples:
+        'Alcatel'  -> 'ALCTL.IS'
+        ' thyao '  -> 'THYAO.IS'
+        'ASELS.IS' -> 'ASELS.IS'
+    """
+    cleaned = _ascii_upper(ticker)
+    if not cleaned:
+        return ""
+
+    # Drop an existing suffix for lookup, remember to re-add later
+    base = cleaned[:-3] if cleaned.endswith(".IS") else cleaned
+    base = base.strip().strip(".")
+
+    # Company-name mapping (with and without inner spaces)
+    if base in COMMON_NAME_MAP:
+        base = COMMON_NAME_MAP[base]
+    else:
+        compact = " ".join(base.split())
+        if compact in COMMON_NAME_MAP:
+            base = COMMON_NAME_MAP[compact]
+        else:
+            # Ticker codes never contain spaces — strip them if present
+            base = base.replace(" ", "")
+
+    return f"{base}.IS" if base else ""
+
+
+def bare_ticker(ticker: str) -> str:
+    """Return the normalized ticker code without the '.IS' suffix."""
+    full = format_bist_ticker(ticker)
+    return full[:-3] if full.endswith(".IS") else full
+
+
+# Backward-compatible alias
 def normalize_ticker(ticker: str) -> str:
-    """Ensure BIST tickers have the Yahoo Finance '.IS' suffix."""
-    ticker = ticker.upper().strip()
-    if not ticker.endswith(".IS"):
-        ticker = f"{ticker}.IS"
-    return ticker
+    """Alias of format_bist_ticker (kept for backward compatibility)."""
+    return format_bist_ticker(ticker)
 
 
-def _compute_rsi(close: pd.Series, length: int = 14) -> Optional[float]:
-    """Compute RSI manually if pandas-ta is unavailable."""
-    if len(close) < length + 1:
+# ---------------------------------------------------------------------------
+# Pure-pandas technical indicators (no pandas-ta / numba dependency)
+# ---------------------------------------------------------------------------
+def compute_rsi(close: pd.Series, length: int = 14) -> Optional[float]:
+    """Wilder's RSI computed with pandas ewm; returns latest value or None."""
+    if close is None or len(close) < length + 1:
         return None
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -54,32 +140,19 @@ def _compute_rsi(close: pd.Series, length: int = 14) -> Optional[float]:
     return float(val) if pd.notna(val) else None
 
 
-def _compute_ema(close: pd.Series, length: int) -> Optional[float]:
-    """Compute EMA manually if pandas-ta is unavailable."""
-    if len(close) < length:
+def compute_ema(close: pd.Series, length: int) -> Optional[float]:
+    """Exponential moving average; returns latest value or None."""
+    if close is None or len(close) < length:
         return None
     ema = close.ewm(span=length, adjust=False).mean()
     val = ema.iloc[-1]
     return float(val) if pd.notna(val) else None
 
 
-def get_stock_summary(ticker: str, lookback_days: int = 60) -> dict[str, Any]:
-    """
-    Fetch ~60 trading days of OHLCV data and return a summary dict.
-
-    Returns keys:
-        ticker, yahoo_ticker, current_price, previous_close,
-        daily_change_pct, rsi_14, ema_20, ema_50,
-        high_60d, low_60d, volume, success, error
-
-    On failure (invalid ticker / no internet), success=False and
-    error contains a human-readable message; numeric fields are None.
-    """
-    yahoo_ticker = normalize_ticker(ticker)
-    bare = yahoo_ticker.replace(".IS", "")
-
-    result: dict[str, Any] = {
-        "ticker": bare,
+def _empty_summary(ticker: str, yahoo_ticker: str, error: str) -> dict[str, Any]:
+    """Graceful fallback summary when data cannot be fetched."""
+    return {
+        "ticker": ticker,
         "yahoo_ticker": yahoo_ticker,
         "current_price": None,
         "previous_close": None,
@@ -91,11 +164,30 @@ def get_stock_summary(ticker: str, lookback_days: int = 60) -> dict[str, Any]:
         "low_60d": None,
         "volume": None,
         "success": False,
-        "error": None,
+        "error": error,
     }
 
+
+def get_stock_summary(ticker: str, lookback_days: int = 60) -> dict[str, Any]:
+    """
+    Fetch ~60 trading days of OHLCV data and return a summary dict.
+
+    Returns keys:
+        ticker, yahoo_ticker, current_price, previous_close,
+        daily_change_pct, rsi_14, ema_20, ema_50,
+        high_60d, low_60d, volume, success, error
+
+    Never raises: on failure (invalid ticker / no internet), success=False
+    and error contains a human-readable Turkish message.
+    """
+    yahoo_ticker = format_bist_ticker(ticker)
+    bare = yahoo_ticker[:-3] if yahoo_ticker.endswith(".IS") else yahoo_ticker
+
+    if not yahoo_ticker:
+        return _empty_summary(ticker, "", "Geçersiz hisse kodu.")
+
     try:
-        # Fetch a bit more than lookback to ensure enough bars after weekends/holidays
+        # Fetch extra days to ensure enough bars after weekends/holidays
         hist = yf.download(
             yahoo_ticker,
             period=f"{lookback_days + 30}d",
@@ -105,8 +197,11 @@ def get_stock_summary(ticker: str, lookback_days: int = 60) -> dict[str, Any]:
         )
 
         if hist is None or hist.empty:
-            result["error"] = f"'{yahoo_ticker}' için veri bulunamadı. Ticker geçersiz olabilir."
-            return result
+            return _empty_summary(
+                bare,
+                yahoo_ticker,
+                f"'{yahoo_ticker}' için veri bulunamadı. Ticker geçersiz olabilir.",
+            )
 
         # Flatten MultiIndex columns if present (yfinance >= 0.2.31)
         if isinstance(hist.columns, pd.MultiIndex):
@@ -114,57 +209,47 @@ def get_stock_summary(ticker: str, lookback_days: int = 60) -> dict[str, Any]:
 
         hist = hist.dropna(subset=["Close"]).tail(lookback_days)
         if len(hist) < 2:
-            result["error"] = f"'{yahoo_ticker}' için yeterli fiyat verisi yok."
-            return result
+            return _empty_summary(
+                bare, yahoo_ticker, f"'{yahoo_ticker}' için yeterli fiyat verisi yok."
+            )
 
         close = hist["Close"].astype(float)
         current = float(close.iloc[-1])
         previous = float(close.iloc[-2])
         change_pct = ((current - previous) / previous) * 100 if previous else 0.0
 
-        # Technical indicators via pandas-ta or manual fallback
-        if HAS_PANDAS_TA:
-            rsi_series = ta.rsi(close, length=14)
-            ema20_series = ta.ema(close, length=20)
-            ema50_series = ta.ema(close, length=50)
-            rsi_val = float(rsi_series.iloc[-1]) if rsi_series is not None and pd.notna(rsi_series.iloc[-1]) else None
-            ema20_val = float(ema20_series.iloc[-1]) if ema20_series is not None and pd.notna(ema20_series.iloc[-1]) else None
-            ema50_val = float(ema50_series.iloc[-1]) if ema50_series is not None and pd.notna(ema50_series.iloc[-1]) else None
-        else:
-            rsi_val = _compute_rsi(close, 14)
-            ema20_val = _compute_ema(close, 20)
-            ema50_val = _compute_ema(close, 50)
-
+        rsi_val = compute_rsi(close, 14)
+        ema20_val = compute_ema(close, 20)
+        ema50_val = compute_ema(close, 50)
         volume = float(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else None
 
-        result.update(
-            {
-                "current_price": round(current, 4),
-                "previous_close": round(previous, 4),
-                "daily_change_pct": round(change_pct, 2),
-                "rsi_14": round(rsi_val, 2) if rsi_val is not None else None,
-                "ema_20": round(ema20_val, 4) if ema20_val is not None else None,
-                "ema_50": round(ema50_val, 4) if ema50_val is not None else None,
-                "high_60d": round(float(close.max()), 4),
-                "low_60d": round(float(close.min()), 4),
-                "volume": volume,
-                "success": True,
-                "error": None,
-            }
-        )
-        return result
+        return {
+            "ticker": bare,
+            "yahoo_ticker": yahoo_ticker,
+            "current_price": round(current, 4),
+            "previous_close": round(previous, 4),
+            "daily_change_pct": round(change_pct, 2),
+            "rsi_14": round(rsi_val, 2) if rsi_val is not None else None,
+            "ema_20": round(ema20_val, 4) if ema20_val is not None else None,
+            "ema_50": round(ema50_val, 4) if ema50_val is not None else None,
+            "high_60d": round(float(close.max()), 4),
+            "low_60d": round(float(close.min()), 4),
+            "volume": volume,
+            "success": True,
+            "error": None,
+        }
 
-    except Exception as exc:  # noqa: BLE001 — surface any network/parse failure cleanly
-        result["error"] = f"Piyasa verisi alınamadı ({yahoo_ticker}): {exc}"
-        return result
+    except Exception as exc:  # noqa: BLE001 — never crash the app on market data
+        return _empty_summary(
+            bare, yahoo_ticker, f"Piyasa verisi alınamadı ({yahoo_ticker}): {exc}"
+        )
 
 
 def get_bist100_index_summary() -> dict[str, Any]:
     """
-    Fetch BIST 100 index (^XU100) daily change for the dashboard metric.
+    Fetch BIST 100 index (XU100) daily change for the dashboard metric.
 
-    Yahoo Finance symbol for BIST 100 is typically 'XU100.IS'.
-    Falls back gracefully if unavailable.
+    Tries 'XU100.IS' first, then '^XU100'. Falls back gracefully.
     """
     candidates = ["XU100.IS", "^XU100"]
     last_error = None
@@ -214,14 +299,14 @@ def get_bist100_index_summary() -> dict[str, Any]:
 
 def get_summaries_for_tickers(tickers: list[str]) -> dict[str, dict[str, Any]]:
     """
-    Batch-fetch summaries for a list of bare tickers.
+    Batch-fetch summaries for a list of tickers (codes or common names).
 
-    Returns a dict keyed by bare ticker symbol.
+    Returns a dict keyed by normalized bare ticker symbol.
     """
-    unique = []
-    seen = set()
+    unique: list[str] = []
+    seen: set[str] = set()
     for t in tickers:
-        bare = t.upper().strip().replace(".IS", "")
+        bare = bare_ticker(t)
         if bare and bare not in seen:
             seen.add(bare)
             unique.append(bare)

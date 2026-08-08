@@ -1,21 +1,24 @@
 """
 SQLite database helpers for BIST 100 Daily AI Analyst.
 
-Manages the `trades` table and provides CRUD helpers for logging,
-querying, and deleting portfolio trades.
+Manages the `trades` table and provides full CRUD helpers:
+add, list (today / by date / all), fetch by id, update, delete,
+plus derived holdings computed from BUY/SELL history.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
 # Database file lives next to this module
 DB_PATH = Path(__file__).resolve().parent / "portfolio.db"
+
+VALID_ACTIONS = ("BUY", "SELL")
 
 
 def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -44,6 +47,26 @@ def init_db(db_path: Path = DB_PATH) -> None:
         conn.commit()
 
 
+def _validate_trade_fields(action: str, quantity: float, price: float) -> str:
+    """Validate shared trade fields; returns the normalized action."""
+    action = (action or "").upper().strip()
+    if action not in VALID_ACTIONS:
+        raise ValueError("action must be 'BUY' or 'SELL'")
+    if quantity <= 0:
+        raise ValueError("quantity must be positive")
+    if price <= 0:
+        raise ValueError("price must be positive")
+    return action
+
+
+def _clean_ticker(ticker: str) -> str:
+    """Store bare uppercase ticker codes without the '.IS' suffix."""
+    cleaned = (ticker or "").upper().strip().replace(".IS", "")
+    if not cleaned:
+        raise ValueError("ticker must not be empty")
+    return cleaned
+
+
 def add_trade(
     ticker: str,
     action: str,
@@ -64,15 +87,8 @@ def add_trade(
         trade_date: ISO date string (YYYY-MM-DD). Defaults to today.
         notes: Optional free-text notes.
     """
-    action = action.upper().strip()
-    if action not in ("BUY", "SELL"):
-        raise ValueError("action must be 'BUY' or 'SELL'")
-    if quantity <= 0:
-        raise ValueError("quantity must be positive")
-    if price <= 0:
-        raise ValueError("price must be positive")
-
-    ticker = ticker.upper().strip().replace(".IS", "")
+    action = _validate_trade_fields(action, quantity, price)
+    ticker = _clean_ticker(ticker)
     if not trade_date:
         trade_date = date.today().isoformat()
 
@@ -87,6 +103,68 @@ def add_trade(
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def get_trade_by_id(trade_id: int, db_path: Path = DB_PATH) -> Optional[dict[str, Any]]:
+    """Return a single trade as a dict, or None when not found."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, date, ticker, action, quantity, price, notes
+            FROM trades
+            WHERE id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_trade(
+    trade_id: int,
+    trade_date: str,
+    ticker: str,
+    action: str,
+    quantity: float,
+    price: float,
+    notes: str = "",
+    db_path: Path = DB_PATH,
+) -> bool:
+    """
+    Update all editable fields of a trade.
+
+    Returns True if a row was updated, False when the id does not exist.
+    """
+    action = _validate_trade_fields(action, quantity, price)
+    ticker = _clean_ticker(ticker)
+    if not trade_date:
+        trade_date = date.today().isoformat()
+
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE trades
+            SET date = ?, ticker = ?, action = ?, quantity = ?, price = ?, notes = ?
+            WHERE id = ?
+            """,
+            (trade_date, ticker, action, quantity, price, notes or "", trade_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_trade(trade_id: int, db_path: Path = DB_PATH) -> bool:
+    """
+    Delete a trade by id.
+
+    Returns True if a row was deleted, False otherwise.
+    """
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def get_todays_trades(db_path: Path = DB_PATH) -> pd.DataFrame:
@@ -144,8 +222,9 @@ def get_current_holdings(db_path: Path = DB_PATH) -> pd.DataFrame:
             conn,
         )
 
+    empty = pd.DataFrame(columns=["ticker", "quantity", "avg_buy_price", "cost_basis"])
     if df.empty:
-        return pd.DataFrame(columns=["ticker", "quantity", "avg_buy_price", "cost_basis"])
+        return empty
 
     holdings: dict[str, dict] = {}
 
@@ -183,31 +262,14 @@ def get_current_holdings(db_path: Path = DB_PATH) -> pd.DataFrame:
                 }
             )
 
-    result = pd.DataFrame(rows)
-    if not result.empty:
-        result = result.sort_values("ticker").reset_index(drop=True)
-    else:
-        result = pd.DataFrame(columns=["ticker", "quantity", "avg_buy_price", "cost_basis"])
-    return result
-
-
-def delete_trade(trade_id: int, db_path: Path = DB_PATH) -> bool:
-    """
-    Delete a trade by id.
-
-    Returns True if a row was deleted, False otherwise.
-    """
-    init_db(db_path)
-    with get_connection(db_path) as conn:
-        cursor = conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
-        conn.commit()
-        return cursor.rowcount > 0
+    if not rows:
+        return empty
+    return pd.DataFrame(rows).sort_values("ticker").reset_index(drop=True)
 
 
 def count_active_positions(db_path: Path = DB_PATH) -> int:
     """Return the number of tickers with a positive net holding."""
-    holdings = get_current_holdings(db_path)
-    return len(holdings)
+    return len(get_current_holdings(db_path))
 
 
 # Ensure schema exists on import
