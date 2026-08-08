@@ -3,6 +3,11 @@ AI analyst module powered by Google Gemini (google-genai SDK).
 
 Evaluates today's trades against technical market context and returns
 a Turkish Markdown coaching report.
+
+API key resolution order:
+  1. Explicit function argument
+  2. Streamlit Cloud / local secrets (st.secrets["GEMINI_API_KEY"])
+  3. Environment variables (.env via python-dotenv): GEMINI_API_KEY, GOOGLE_API_KEY
 """
 
 from __future__ import annotations
@@ -15,9 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Preferred model order. Older IDs (2.5 / 2.0 / 1.5) may 404 for new API keys;
-# newer Flash variants are tried first, then legacy fallbacks.
-# Override anytime with GEMINI_MODEL in .env
+# Preferred model order. Override anytime with GEMINI_MODEL in secrets/.env
 DEFAULT_MODEL_CANDIDATES = [
     "gemini-2.5-flash-lite",
     "gemini-3.1-flash-lite",
@@ -57,6 +60,110 @@ Language & format constraints (CRITICAL):
   ## Yarın İçin Destek & Direnç
   ## Tek Cümlelik Motivasyon
 """
+
+
+def _clean_api_key(raw: Optional[str]) -> Optional[str]:
+    """Strip whitespace / wrapping quotes from an API key value."""
+    if raw is None:
+        return None
+    key = str(raw).strip()
+    if (key.startswith('"') and key.endswith('"')) or (
+        key.startswith("'") and key.endswith("'")
+    ):
+        key = key[1:-1].strip()
+    # Reject placeholders / empty
+    if not key or key.lower() in {
+        "your_gemini_api_key_here",
+        "none",
+        "null",
+        "undefined",
+    }:
+        return None
+    return key
+
+
+def get_gemini_api_key(explicit: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve GEMINI_API_KEY from Streamlit Secrets, then environment variables.
+
+    Order:
+      1. explicit argument
+      2. st.secrets["GEMINI_API_KEY"] (Streamlit Cloud / secrets.toml)
+      3. os.environ GEMINI_API_KEY / GOOGLE_API_KEY (.env supported via dotenv)
+    """
+    cleaned = _clean_api_key(explicit)
+    if cleaned:
+        return cleaned
+
+    # Streamlit Cloud / local .streamlit/secrets.toml
+    try:
+        import streamlit as st
+
+        if "GEMINI_API_KEY" in st.secrets:
+            cleaned = _clean_api_key(st.secrets["GEMINI_API_KEY"])
+            if cleaned:
+                return cleaned
+        # Optional alternate secret name
+        if "GOOGLE_API_KEY" in st.secrets:
+            cleaned = _clean_api_key(st.secrets["GOOGLE_API_KEY"])
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
+
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        cleaned = _clean_api_key(os.getenv(env_name))
+        if cleaned:
+            return cleaned
+
+    return None
+
+
+def get_gemini_client(api_key: Optional[str] = None):
+    """
+    Build a google-genai Client using Streamlit Secrets or env API key.
+
+    Returns:
+        (client, None) on success, or (None, error_markdown) on failure.
+    """
+    try:
+        from google import genai
+    except ImportError:
+        return None, (
+            "⚠️ **Paket Eksik**\n\n"
+            "`google-genai` yüklü değil. Şunu çalıştırın: "
+            "`pip install google-genai`"
+        )
+
+    key = get_gemini_api_key(api_key)
+    if not key:
+        # Surface in Streamlit UI when available
+        try:
+            import streamlit as st
+
+            st.error(
+                "GEMINI_API_KEY bulunamadı. Lütfen Streamlit Secrets veya "
+                ".env dosyanızı kontrol edin."
+            )
+        except Exception:
+            pass
+        return None, (
+            "⚠️ **API Anahtarı Eksik**\n\n"
+            "`GEMINI_API_KEY` bulunamadı. Lütfen **Streamlit Secrets** veya "
+            "`.env` dosyanızı kontrol edin.\n\n"
+            "Yerel için `.env`:\n"
+            "```\nGEMINI_API_KEY=AIza...\n```\n\n"
+            "Anahtarı [Google AI Studio](https://aistudio.google.com/apikey) "
+            "üzerinden ücretsiz oluşturun (OAuth / Cloud access token değil)."
+        )
+
+    # Ensure the Developer API path is used (API key), not Vertex ADC/OAuth.
+    os.environ["GOOGLE_API_KEY"] = key
+    # Avoid accidental Vertex routing when only an AI Studio key is present
+    os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+
+    client = genai.Client(api_key=key)
+    return client, None
 
 
 def _format_trades(trades_df: pd.DataFrame) -> str:
@@ -121,14 +228,22 @@ def _normalize_model_id(name: str) -> str:
     return name
 
 
+def _secret_or_env_model() -> Optional[str]:
+    """Optional model override from Streamlit secrets or env."""
+    try:
+        import streamlit as st
+
+        if "GEMINI_MODEL" in st.secrets:
+            return _normalize_model_id(str(st.secrets["GEMINI_MODEL"]))
+    except Exception:
+        pass
+    return _normalize_model_id(os.getenv("GEMINI_MODEL") or "") or None
+
+
 def _candidate_models(explicit: Optional[str] = None) -> list[str]:
-    """Build ordered unique model candidates from env + defaults."""
+    """Build ordered unique model candidates from env/secrets + defaults."""
     ordered: list[str] = []
-    for raw in (
-        explicit,
-        os.getenv("GEMINI_MODEL"),
-        *DEFAULT_MODEL_CANDIDATES,
-    ):
+    for raw in (explicit, _secret_or_env_model(), *DEFAULT_MODEL_CANDIDATES):
         mid = _normalize_model_id(raw or "")
         if mid and mid not in ordered:
             ordered.append(mid)
@@ -146,7 +261,6 @@ def _discover_flash_models(client) -> list[str]:
             methods = getattr(model, "supported_actions", None) or getattr(
                 model, "supported_generation_methods", None
             )
-            # Keep flash-family text models; skip embeddings / image-only
             if "flash" not in name.lower():
                 continue
             if any(x in name.lower() for x in ("embed", "image", "tts", "live")):
@@ -171,6 +285,49 @@ def _is_model_unavailable(exc: Exception) -> bool:
     )
 
 
+def _is_auth_error(exc: Exception) -> bool:
+    """True for 401 / unauthenticated / bad API key style failures."""
+    text = str(exc).lower()
+    return (
+        "401" in text
+        or "unauthenticated" in text
+        or "access_token_type_unsupported" in text
+        or "invalid authentication" in text
+        or "api key not valid" in text
+        or "permission_denied" in text
+    )
+
+
+def _auth_error_message(exc: Exception, key_hint: Optional[str]) -> str:
+    """User-facing guidance for 401 / bad credential errors."""
+    preview = ""
+    if key_hint:
+        # Never print the full key — only a safe fingerprint
+        preview = (
+            f"\n\nAlgılanan anahtar özeti: `{key_hint[:4]}…{key_hint[-4:]}` "
+            f"(uzunluk: {len(key_hint)})"
+        )
+        if not key_hint.startswith("AIza"):
+            preview += (
+                "\n\n⚠️ Bu anahtar tipik bir **Google AI Studio** anahtarı gibi "
+                "görünmüyor (genelde `AIza` ile başlar). OAuth / Cloud token "
+                "kullanmayın."
+            )
+
+    return (
+        "⚠️ **Kimlik Doğrulama Hatası (401)**\n\n"
+        "Gemini API anahtarınız geçersiz veya yanlış türde.\n\n"
+        f"```\n{exc}\n```"
+        f"{preview}\n\n"
+        "**Ne yapmalısınız?**\n"
+        "1. https://aistudio.google.com/apikey adresinden **yeni bir API key** oluşturun\n"
+        "2. `.env` dosyanızı şöyle yazın (tırnak işareti olmadan):\n"
+        "```\nGEMINI_API_KEY=AIzaSy...\nGEMINI_MODEL=gemini-2.5-flash-lite\n```\n"
+        "3. Streamlit Cloud kullanıyorsanız: App settings → Secrets içine aynı anahtarı ekleyin\n"
+        "4. Uygulamayı tamamen durdurup (`Ctrl+C`) yeniden başlatın\n"
+    )
+
+
 def analyze_daily_performance(
     trades_df: pd.DataFrame,
     market_data_dict: dict[str, dict[str, Any]],
@@ -180,25 +337,8 @@ def analyze_daily_performance(
     """
     Send today's trades + technical context to Gemini and return Markdown text.
 
-    Args:
-        trades_df: DataFrame of today's trades (from database.get_todays_trades).
-        market_data_dict: Mapping of ticker -> get_stock_summary() result.
-        api_key: Optional override; otherwise reads GEMINI_API_KEY from env.
-        model: Preferred Gemini model id. Falls back through DEFAULT_MODEL_CANDIDATES
-               and GEMINI_MODEL env var when unavailable (404).
-
-    Returns:
-        Turkish Markdown analysis string, or an error message on failure.
+    Uses a single Client from get_gemini_client() (Streamlit Secrets → .env).
     """
-    key = api_key or os.getenv("GEMINI_API_KEY")
-    if not key or key.strip() in ("", "your_gemini_api_key_here"):
-        return (
-            "⚠️ **API Anahtarı Eksik**\n\n"
-            "`.env` dosyanıza geçerli bir `GEMINI_API_KEY` ekleyin. "
-            "Anahtarı [Google AI Studio](https://aistudio.google.com/apikey) "
-            "üzerinden ücretsiz alabilirsiniz."
-        )
-
     if (trades_df is None or trades_df.empty) and not market_data_dict:
         return (
             "📭 **Analiz için veri yok**\n\n"
@@ -207,7 +347,6 @@ def analyze_daily_performance(
         )
 
     try:
-        from google import genai
         from google.genai import types
     except ImportError:
         return (
@@ -216,12 +355,15 @@ def analyze_daily_performance(
             "`pip install google-genai`"
         )
 
+    client, client_error = get_gemini_client(api_key)
+    if client is None:
+        return client_error or "⚠️ Gemini istemcisi oluşturulamadı."
+
+    resolved_key = get_gemini_api_key(api_key)
     user_prompt = _build_user_prompt(trades_df, market_data_dict)
     candidates = _candidate_models(model)
 
     try:
-        client = genai.Client(api_key=key)
-        # Append any live flash models not already in the candidate list
         for discovered in _discover_flash_models(client):
             if discovered not in candidates:
                 candidates.append(discovered)
@@ -249,9 +391,10 @@ def analyze_daily_performance(
                 return text
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                if _is_auth_error(exc):
+                    return _auth_error_message(exc, resolved_key)
                 if _is_model_unavailable(exc):
-                    continue  # try next model
-                # Non-model errors (auth, quota, network) — stop early
+                    continue
                 break
 
         return (
@@ -259,12 +402,13 @@ def analyze_daily_performance(
             "Gemini API çağrısı başarısız oldu.\n\n"
             f"**Denenen modeller:** `{', '.join(tried)}`\n\n"
             f"```\n{last_error}\n```\n\n"
-            "`.env` içine çalışan bir model yazabilirsiniz, örn:\n"
-            "`GEMINI_MODEL=gemini-2.5-flash-lite`\n\n"
-            "İnternet bağlantınızı ve API anahtarınızı da kontrol edin."
+            "`.env` / Secrets içine çalışan bir model yazabilirsiniz, örn:\n"
+            "`GEMINI_MODEL=gemini-2.5-flash-lite`\n"
         )
 
-    except Exception as exc:  # noqa: BLE001 — surface API / network failures to the UI
+    except Exception as exc:  # noqa: BLE001
+        if _is_auth_error(exc):
+            return _auth_error_message(exc, resolved_key)
         return (
             "⚠️ **AI Analiz Hatası**\n\n"
             f"Gemini API çağrısı başarısız oldu:\n\n```\n{exc}\n```\n\n"
