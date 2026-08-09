@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
@@ -225,6 +225,61 @@ section[data-testid="stSidebar"] [data-testid="stCaption"] {
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.45; }
+}
+
+/* ========== Weekend closed notice ========== */
+.weekend-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    background: linear-gradient(135deg, rgba(255,152,0,0.12) 0%, rgba(30,34,45,0.95) 55%);
+    border: 1px solid rgba(255,152,0,0.35);
+    border-left: 4px solid var(--amber);
+    border-radius: 12px;
+    padding: 0.9rem 1.15rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.22);
+}
+.weekend-banner-icon {
+    flex-shrink: 0;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--amber-dim);
+    border: 1px solid rgba(255,152,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
+}
+.weekend-banner-body {
+    flex: 1;
+    min-width: 0;
+}
+.weekend-banner-title {
+    margin: 0;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.35;
+}
+.weekend-banner-sub {
+    margin: 0.25rem 0 0 0;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.weekend-badge {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--amber);
+    background: var(--amber-dim);
+    border: 1px solid rgba(255,152,0,0.35);
+    border-radius: 999px;
+    padding: 0.28rem 0.65rem;
+    white-space: nowrap;
 }
 
 /* ========== KPI cards ========== */
@@ -563,6 +618,8 @@ div[data-testid="stDataFrame"] * {
     .kpi-row { grid-template-columns: 1fr; }
     .tech-grid { grid-template-columns: repeat(2, 1fr); }
     .app-header { flex-direction: column; align-items: flex-start; }
+    .weekend-banner { flex-wrap: wrap; }
+    .weekend-badge { margin-left: auto; }
 }
 </style>
 """
@@ -616,6 +673,127 @@ def _parse_iso_date(value: str) -> date:
 # ---------------------------------------------------------------------------
 # UI building blocks
 # ---------------------------------------------------------------------------
+def is_weekend(day: date | None = None) -> bool:
+    """True when the given (or local system) date falls on Saturday or Sunday."""
+    d = day or date.today()
+    return d.weekday() >= 5  # 5=Saturday, 6=Sunday
+
+
+def weekend_day_label(day: date | None = None) -> str:
+    """Turkish weekday name for Saturday / Sunday."""
+    d = day or date.today()
+    return "Cumartesi" if d.weekday() == 5 else "Pazar"
+
+
+def render_weekend_closed_notice() -> None:
+    """
+    Show a prominent notice when Borsa Istanbul is closed for the weekend.
+    Only renders on Saturday (weekday=5) or Sunday (weekday=6).
+    """
+    if not is_weekend():
+        return
+
+    day_name = weekend_day_label()
+    st.markdown(
+        f"""
+        <div class="weekend-banner" role="status" aria-live="polite">
+          <div class="weekend-banner-icon">🔒</div>
+          <div class="weekend-banner-body">
+            <p class="weekend-banner-title">
+              Borsa İstanbul hafta sonu nedeniyle kapalıdır. (Cumartesi / Pazar)
+            </p>
+            <p class="weekend-banner-sub">
+              Bugün {html.escape(day_name)} — piyasa verileri son işlem gününe ait olabilir.
+            </p>
+          </div>
+          <span class="weekend-badge">Kapalı</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_live_clock() -> None:
+    """
+    Client-side HH:MM:SS digital clock (Europe/Istanbul).
+
+    Uses an HTML/JS iframe so the clock ticks every second without
+    triggering a Streamlit rerun (page stays responsive).
+    """
+    # Seed with server time so the first paint is never blank/00:00:00
+    seed = datetime.now().strftime("%H:%M:%S")
+    components.html(
+        f"""
+        <style>
+          html, body {{
+            margin: 0; padding: 0; background: transparent; overflow: hidden;
+            font-family: 'JetBrains Mono', 'Inter', ui-monospace, monospace;
+          }}
+          .clock-shell {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            justify-content: center;
+            height: 52px;
+            padding: 0 0.15rem;
+            box-sizing: border-box;
+          }}
+          .clock-label {{
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #787b86;
+            margin-bottom: 0.2rem;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+          }}
+          .digital-clock {{
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: 0.06em;
+            font-variant-numeric: tabular-nums;
+            background: #1e222d;
+            border: 1px solid #363a45;
+            border-radius: 10px;
+            padding: 0.28rem 0.7rem;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.28);
+            line-height: 1.2;
+            min-width: 6.6ch;
+            text-align: center;
+          }}
+        </style>
+        <div class="clock-shell" title="Canlı saat (Europe/Istanbul)">
+          <div class="clock-label">⏱ Canlı Saat</div>
+          <div id="bist-live-clock" class="digital-clock">{seed}</div>
+        </div>
+        <script>
+        (function () {{
+          const el = document.getElementById('bist-live-clock');
+          if (!el) return;
+
+          const fmt = new Intl.DateTimeFormat('tr-TR', {{
+            timeZone: 'Europe/Istanbul',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+          }});
+
+          function tick() {{
+            // tr-TR may use '.' as separator — normalize to HH:MM:SS
+            el.textContent = fmt.format(new Date()).replace(/\\./g, ':');
+          }}
+
+          tick();
+          setInterval(tick, 1000);
+        }})();
+        </script>
+        """,
+        height=56,
+    )
+
+
 def render_sidebar_toggle_button() -> None:
     """
     Reliable sidebar toggle: HTML button lives in the component iframe and
@@ -1154,9 +1332,9 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Main page — header + KPI row
+# Main page — header + live clock + weekend notice + KPI row
 # ---------------------------------------------------------------------------
-top_l, top_r = st.columns([5, 1])
+top_l, top_clock, top_r = st.columns([4.4, 1.15, 1])
 with top_l:
     st.markdown(
         """
@@ -1173,10 +1351,16 @@ with top_l:
         """,
         unsafe_allow_html=True,
     )
+with top_clock:
+    st.write("")  # vertical align with header
+    render_live_clock()
 with top_r:
     st.write("")  # vertical align with header
     st.caption("Sol paneli aç / kapat")
     render_sidebar_toggle_button()
+
+# Weekend market-closed banner (Saturday / Sunday only)
+render_weekend_closed_notice()
 
 todays_trades = db.get_todays_trades()
 active_positions = db.count_active_positions()
