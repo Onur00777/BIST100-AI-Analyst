@@ -1,8 +1,12 @@
 """
 AI analyst module powered by Google Gemini (google-genai SDK).
 
-Analyzes either a single day's trades or the current cumulative portfolio
-against live technical market context, returning a Turkish Markdown report.
+Strict Turkish BIST lead-analyst engine:
+- Absolute coverage: EVERY ticker in the portfolio/day appears in
+  Destek & Direnç table, hisse-bazlı verdicts, and news/sector notes.
+- Direct verdict language with mandatory tags:
+  [ÇOK İYİ HAMLE] / [RİSKLİ / NÖTR] / [HATALI / TEHLİKELİ]
+- English headlines must be translated to Turkish; missing news → sector outlook.
 
 Dual-environment API key resolution (works on localhost AND Streamlit Cloud):
   1. Explicit function argument
@@ -39,61 +43,62 @@ DEFAULT_MODEL_CANDIDATES = [
     "gemini-1.5-flash",
 ]
 
-# System instructions stay in English; the model MUST reply in Turkish.
+# System instructions: strict Turkish BIST lead analyst — full coverage, direct verdicts.
 SYSTEM_INSTRUCTION = """
-You are an experienced BIST (Borsa Istanbul) trading coach and technical analyst.
-You review either a single day's trades or a cumulative portfolio with
-constructive honesty, incorporating recent company/sector news when provided.
+Sen Borsa İstanbul (BIST) konusunda uzman, sözünü sakınmayan sert ve rasyonel bir Baş Analistsin.
 
-Evaluation rules (always follow):
-1. Trading discipline: Did the trader overtrade, chase price, or ignore risk size?
-2. Entry quality: For BUY trades / open positions, check whether price was near
-   support, near the 60-day low, below EMA-20/EMA-50, or whether RSI(14) was
-   oversold (<30) or overbought (>70). Praise patient entries; warn about FOMO
-   buys into strength.
-3. Concentration risk: Highlight if too much capital or too many trades cluster
-   in one ticker or a single sector theme.
-4. News & sector context: Use provided headlines/summaries to flag positive and
-   negative developments that could move the stock near-term.
-5. Tomorrow levels: For each discussed ticker (or the most important one), give
-   exactly 1 key Support and 1 key Resistance level, derived from the provided
-   high_60d / low_60d / EMA / current price context.
-6. Expected-change score: Assign ONE overall score from -10 to +10 for the
-   near-term outlook of the analyzed scope (portfolio or day), combining
-   technicals + news. Be honest; do not inflate scores.
-7. Strategy: End with one short, practical strategy suggestion.
-8. Tone: Encouraging, clear, and practical — never hype. Be a calm mentor.
+MUTLAK KURALLAR (İHLAL YASAK):
+1. Sana iletilen portföydeki / işlem listesindeki TÜM hisseleri İSTİSNASIZ analiz et.
+   Tek bir hisseyi bile atlamak, özet geçmek veya "diğerleri benzer" demek YASAKTIR.
+2. Çıktının tamamı sade, net, doğrudan TÜRKÇE olmalıdır (SCORE satırı hariç).
+3. İngilizce haber başlıklarını / özetlerini ANINDA Türkçe'ye çevirip sun.
+4. Haberi olmayan her hisse için o hissenin sektörüne kısa bir sektör görünümü yaz
+   (ör. "Enerji sektörü genel görünümü..."). Her hisse haber bölümünde yer almalı.
+5. Belirsiz / pasif dil YASAK: "düşünülebilir", "bakılabilir", "değerlendirilebilir",
+   "izlenebilir" gibi kaçamak ifadeler kullanma.
+6. Direkt dil ZORUNLU. Örnekler:
+   - "Alman/Eklemen harika bir hamle olmuş"
+   - "Bu fiyattan alman riskli bir hata olmuş"
+   - "Derhal stop-loss düşünülmeli"
+   - "Kâr al bölgesi"
+7. Her hisse için şu etiketlerden BİRİNİ açıkça ver:
+   [ÇOK İYİ HAMLE]  veya  [RİSKLİ / NÖTR]  veya  [HATALI / TEHLİKELİ]
+8. Destek & Direnç tablosunda portföydeki HER hisse için satır üret. Satır atlama yok.
+9. Beklenen değişim puanı: -10 ile +10 arası TEK skor. Dürüst ol; şişirme.
 
-Language & format constraints (CRITICAL):
-- The FINAL OUTPUT MUST be entirely in simple, clear, encouraging TURKISH
-  EXCEPT for the mandatory machine-readable score line (see below).
-- Use clean Markdown: ## headers, bullet points, and short paragraphs.
-- ALWAYS include these sections (in addition to the review structure):
-  ## Sektörel & Şirket Haberleri Özeti
-     - Bullet key positive and negative developments from the news feed.
-  ## Beklenen Değişim Puanı
-     - First line MUST be exactly: SCORE: <integer from -10 to +10>
-       Example: SCORE: +7
-     - Second line: human label like `+7/10 - Yükseliş Beklentisi Kuvvetli`
-       or `-4/10 - Kısa Vadeli Düzeltme Baskısı`
-     - Then 2–3 short bullet reasons supporting the score.
-- Suggested structure for a daily review:
-  ## Günlük Özet
-  ## Disiplin Değerlendirmesi
-  ## İşlem Bazlı Teknik Yorum
-  ## Sektörel & Şirket Haberleri Özeti
-  ## Konsantrasyon / Risk Notu
-  ## Yarın İçin Destek & Direnç
-  ## Beklenen Değişim Puanı
-  ## Strateji Önerisi
-- Suggested structure for a portfolio review:
-  ## Portföy Özeti
-  ## Pozisyon Bazlı Teknik Yorum
-  ## Sektörel & Şirket Haberleri Özeti
-  ## Konsantrasyon / Risk Notu
-  ## Destek & Direnç Seviyeleri
-  ## Beklenen Değişim Puanı
-  ## Strateji Önerisi
+ZORUNLU RAPOR İSKELETİ (Markdown, bu sırayla):
+
+## 📊 Genel Portföy Kararı ve Değişim Puanı
+- Net skor ve 3 maddelik özet.
+- İlk satır mutlaka: SCORE: <integer -10..+10>
+  Örnek: SCORE: +4
+- İkinci satır: `+4/10 - ...` formatında etiket
+- Ardından 2–3 kısa gerekçe maddesi
+
+## 🎯 Destek & Direnç Tablosu
+Portföydeki TÜM hisseler için Markdown tablosu (hiçbir hisse eksik kalmasın):
+
+| Hisse | Anlık Fiyat | Destek 1 | Destek 2 | Direnç 1 | Direnç 2 | Aksiyon / Tavsiye |
+| --- | --- | --- | --- | --- | --- | --- |
+| ... | ... | ... | ... | ... | ... | ... |
+
+Seviyeleri verilen current_price / EMA / high_60d / low_60d bağlamından üret.
+
+## 🔍 Hisse Bazlı İsabet Değerlendirmesi
+Her hisse için AYRI alt başlık (### THYAO gibi) ve:
+- Etiket: [ÇOK İYİ HAMLE] / [RİSKLİ / NÖTR] / [HATALI / TEHLİKELİ]
+- "Bu hisseyi bu fiyattan almak/tutmak iyi olmuş çünkü..." VEYA
+  "Bu alım hatalı olmuş çünkü..." şeklinde direkt, babacan/sert eleştiri
+- Kısa teknik gerekçe (RSI, EMA, maliyet vs fiyat)
+
+## 📰 Sektörel & Şirket Haberleri
+Portföydeki HER hisse için en az bir madde:
+- Varsa şirket haberini Türkçe özetle
+- Yoksa: "{Hisse} — {Sektör} sektörü genel görünümü: ..."
+
+## 💡 Net Strateji ve Reçete
+- Hangi hissenin ağırlığı azaltılmalı, hangisi tutulmalı, nereden stop olunmalı
+  açık açık söyle. Yuvarlak laflar yok.
 """
 
 
@@ -162,7 +167,7 @@ def parse_expected_score(report_text: str) -> dict[str, Any]:
 
     # Pull a few bullets from the score section as reasons
     score_section = re.search(
-        r"(?is)##\s*Beklenen Değişim Puanı\s*(.*?)(?=\n##\s|\Z)",
+        r"(?is)##\s*.*?(?:Beklenen Değişim|Genel Portföy Kararı|Değişim Puanı).*?\n(.*?)(?=\n##\s|\Z)",
         text,
     )
     if score_section:
@@ -185,6 +190,59 @@ def score_badge_meta(score: Optional[int]) -> dict[str, str]:
     if score >= -5:
         return {"tone": "neg", "emoji": "📉", "title": "Negatif"}
     return {"tone": "neg", "emoji": "⚠️", "title": "Güçlü Negatif"}
+
+
+def list_required_tickers(
+    market_data_dict: Optional[dict[str, dict[str, Any]]] = None,
+    holdings_df: Optional[pd.DataFrame] = None,
+    trades_df: Optional[pd.DataFrame] = None,
+) -> list[str]:
+    """Deduplicated ticker universe that MUST appear in the report."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        t = str(raw or "").strip().upper().replace(".IS", "")
+        if t and t not in seen:
+            seen.add(t)
+            ordered.append(t)
+
+    if holdings_df is not None and not holdings_df.empty and "ticker" in holdings_df.columns:
+        for t in holdings_df["ticker"].tolist():
+            _add(t)
+    if trades_df is not None and not trades_df.empty and "ticker" in trades_df.columns:
+        for t in trades_df["ticker"].tolist():
+            _add(t)
+    if market_data_dict:
+        for t in market_data_dict.keys():
+            _add(t)
+    return ordered
+
+
+def coverage_checklist(tickers: list[str]) -> str:
+    """Explicit checklist injected into the user prompt."""
+    if not tickers:
+        return "(Hisse listesi boş)"
+    n = len(tickers)
+    lines = [
+        f"ZORUNLU KAPSAM: {n} hisse — HEPSİ tabloda, hisse bazlı kararda ve haberlerde olmalı:",
+        ", ".join(tickers),
+        "",
+        "Her hisse için doğrula:",
+    ]
+    for t in tickers:
+        lines.append(
+            f"- [ ] {t}: Destek/Direnç satırı + [ÇOK İYİ HAMLE|RİSKLİ / NÖTR|HATALI / TEHLİKELİ] + haber/sektör notu"
+        )
+    return "\n".join(lines)
+
+
+def report_missing_tickers(report_text: str, required: list[str]) -> list[str]:
+    """Return tickers that do not appear anywhere in the generated report."""
+    if not report_text or not required:
+        return list(required or [])
+    upper = report_text.upper()
+    return [t for t in required if t.upper() not in upper]
 
 
 # ---------------------------------------------------------------------------
@@ -347,18 +405,32 @@ def _format_market_data(market_data_dict: dict[str, dict[str, Any]]) -> str:
 
 
 def _format_news(news_dict: Optional[dict[str, dict[str, Any]]]) -> str:
-    """Serialize recent headlines for Gemini (sector/company context)."""
+    """
+    Serialize recent headlines for Gemini.
+
+    Every ticker in news_dict gets a block — empty feeds are marked so the
+    model MUST write a Turkish sector outlook instead of skipping the name.
+    """
     if not news_dict:
         return "No recent news available."
 
     blocks = []
     for ticker, payload in news_dict.items():
+        sector = (payload or {}).get("sector") or "Genel Piyasa"
         items = (payload or {}).get("news") or []
-        if not items:
-            err = (payload or {}).get("error") or "no headlines"
-            blocks.append(f"[{ticker}] NEWS: {err}")
+        needs_fallback = bool((payload or {}).get("needs_sector_fallback", not items))
+
+        if not items or needs_fallback:
+            err = (payload or {}).get("error") or "doğrudan haber yok"
+            blocks.append(
+                f"[{ticker}] SECTOR={sector}\n"
+                f"  STATUS: NO_DIRECT_NEWS ({err})\n"
+                f"  INSTRUCTION: '{ticker}' için '{sector}' sektörünün "
+                f"genel görünümünü 1–2 cümle Türkçe yaz. Atlama."
+            )
             continue
-        lines = [f"[{ticker}] recent news:"]
+
+        lines = [f"[{ticker}] SECTOR={sector} | recent news (translate ALL to Turkish):"]
         for i, n in enumerate(items, 1):
             title = n.get("title") or ""
             publisher = n.get("publisher") or ""
@@ -376,6 +448,46 @@ def _format_news(news_dict: Optional[dict[str, dict[str, Any]]]) -> str:
     return "\n\n".join(blocks) if blocks else "No recent news available."
 
 
+def _user_report_contract(ticker_count: int, tickers: list[str]) -> str:
+    """Hard user-facing contract pasted into every analysis prompt."""
+    joined = ", ".join(tickers) if tickers else "(yok)"
+    return f"""
+=== ANALİZ SÖZLEŞMESİ (ZORUNLU) ===
+Sen Borsa İstanbul (BIST) konusunda uzman, sözünü sakınmayan sert ve rasyonel bir Baş Analistsin.
+Sana iletilen portföydeki {ticker_count} hissenin İSTİSNASIZ HEPSİNİ analiz edeceksin.
+TEK BİR HİSSEYİ BİLE ATLAMAK VEYA ÖZET GEÇMEK YASAKTIR.
+
+Hisse listesi ({ticker_count}): {joined}
+
+Rapor Formatın Şu Şekilde Olmalıdır:
+
+1. 📊 GENEL PORTFÖY KARARI VE DEĞİŞİM PUANI (-10 ile +10)
+- Net Skor ve 3 maddelik özet.
+- İlk satır: SCORE: <tamsayı>
+
+2. 🎯 TÜM HİSSELER İÇİN DESTEK & DİRENÇ TABLOSU (TAM LİSTE)
+| Hisse | Anlık Fiyat | Destek 1 | Destek 2 | Direnç 1 | Direnç 2 | Aksiyon / Tavsiye |
+(Portföydeki tüm {ticker_count} hisse burada tablo halinde LİSTELENECEK).
+
+3. 🔍 HİSSE BAZLI İSABET DEĞERLENDİRMESİ (DOĞRUDAN VE NET DİL)
+Her hisse için tek tek:
+- [ÇOK İYİ HAMLE] / [RİSKLİ / NÖTR] / [HATALI / TEHLİKELİ] etiketi ver.
+- "Bu hisseyi bu fiyattan almak/tutmak iyi olmuş çünkü..." veya
+  "Bu alım hatalı olmuş çünkü..." şeklinde direkt babacan/sert bir dille eleştir.
+- "düşünülebilir / bakılabilir" gibi kaçamak dil KULLANMA.
+
+4. 📰 TÜM ŞİRKETLER İÇİN SEKTÖREL VE ŞİRKET HABERLERİ (TAMAMI TÜRKÇE)
+- İngilizce haberleri anında Türkçe'ye çevir.
+- Haberi olmayan hisseler için sektörün genel durumunu yaz.
+- {ticker_count} hissenin tamamı bu bölümde geçmeli.
+
+5. 💡 NET STRATEJİ VE REÇETE
+- Hangi hissenin ağırlığı azaltılmalı, hangisi tutulmalı, nereden stop olunmalı açık açık söyle.
+
+{coverage_checklist(tickers)}
+""".strip()
+
+
 def _build_daily_prompt(
     trades_df: pd.DataFrame,
     market_data_dict: dict[str, dict[str, Any]],
@@ -383,17 +495,22 @@ def _build_daily_prompt(
     news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """User prompt for a specific date's trades."""
-    date_part = f" (date: {analysis_date})" if analysis_date else ""
+    tickers = list_required_tickers(
+        market_data_dict=market_data_dict, trades_df=trades_df
+    )
+    ticker_count = len(tickers)
+    date_part = f" (tarih: {analysis_date})" if analysis_date else ""
     return (
-        f"Analyze this BIST trading session{date_part} for a retail portfolio.\n\n"
-        "=== TRADES ===\n"
+        f"Bu BIST işlem gününü{date_part} analiz et.\n\n"
+        f"{_user_report_contract(ticker_count, tickers)}\n\n"
+        "=== İŞLEMLER ===\n"
         f"{_format_trades(trades_df)}\n\n"
-        "=== MARKET / TECHNICAL SNAPSHOT ===\n"
+        "=== TEKNİK GÖRÜNÜM ===\n"
         f"{_format_market_data(market_data_dict)}\n\n"
-        "=== RECENT COMPANY / SECTOR NEWS ===\n"
+        "=== ŞİRKET / SEKTÖR HABERLERİ ===\n"
         f"{_format_news(news_dict)}\n\n"
-        "Produce the Turkish Markdown daily coaching report now "
-        "(use the daily review structure, including news summary and SCORE line)."
+        f"Şimdi {ticker_count} hissenin tamamını kapsayan Türkçe Markdown raporu yaz. "
+        "Tablo satırı eksik bırakma."
     )
 
 
@@ -403,19 +520,22 @@ def _build_portfolio_prompt(
     news_dict: Optional[dict[str, dict[str, Any]]] = None,
 ) -> str:
     """User prompt for the whole active portfolio."""
+    tickers = list_required_tickers(
+        market_data_dict=market_data_dict, holdings_df=holdings_df
+    )
+    ticker_count = len(tickers)
     return (
-        "Analyze this retail investor's CURRENT ACTIVE BIST PORTFOLIO "
-        "(cumulative open positions).\n\n"
-        "=== OPEN POSITIONS ===\n"
+        "Bu yatırımcının GÜNCEL AKTİF BIST PORTFÖYÜNÜ (açık pozisyonlar) analiz et.\n\n"
+        f"{_user_report_contract(ticker_count, tickers)}\n\n"
+        "=== AÇIK POZİSYONLAR ===\n"
         f"{_format_holdings(holdings_df)}\n\n"
-        "=== MARKET / TECHNICAL SNAPSHOT ===\n"
+        "=== TEKNİK GÖRÜNÜM ===\n"
         f"{_format_market_data(market_data_dict)}\n\n"
-        "=== RECENT COMPANY / SECTOR NEWS ===\n"
+        "=== ŞİRKET / SEKTÖR HABERLERİ ===\n"
         f"{_format_news(news_dict)}\n\n"
-        "For each position, compare current price vs average buy price "
-        "(unrealized P/L direction), evaluate technical posture and news, then "
-        "produce the Turkish Markdown portfolio report "
-        "(include news summary and SCORE line)."
+        "Her pozisyon için maliyet vs güncel fiyat (gerçekleşmemiş K/Z yönü) değerlendir. "
+        f"Şimdi {ticker_count} hissenin tamamını kapsayan Türkçe Markdown portföy raporu yaz. "
+        "Tablo satırı eksik bırakma."
     )
 
 
@@ -583,8 +703,9 @@ def _run_gemini(
     try:
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.6,
-            max_output_tokens=4096,
+            temperature=0.45,
+            # Large portfolios (10–20 tickers) need room for full tables + verdicts
+            max_output_tokens=8192,
         )
 
         last_error: Optional[Exception] = None
@@ -699,6 +820,12 @@ def analyze_daily_performance(
             "veya önce bir işlem ekleyin."
         )
 
+    # Guarantee every analyzed ticker has a news/sector slot
+    required = list_required_tickers(
+        market_data_dict=market_data_dict, trades_df=trades_df
+    )
+    news_dict = _ensure_news_coverage(required, news_dict)
+
     prompt = _build_daily_prompt(
         trades_df, market_data_dict, analysis_date, news_dict=news_dict
     )
@@ -724,7 +851,55 @@ def analyze_portfolio(
             "Önce bir BUY işlemi ekleyin."
         )
 
+    required = list_required_tickers(
+        market_data_dict=market_data_dict, holdings_df=holdings_df
+    )
+    news_dict = _ensure_news_coverage(required, news_dict)
+
     prompt = _build_portfolio_prompt(
         holdings_df, market_data_dict, news_dict=news_dict
     )
     return _run_gemini(prompt, api_key=api_key, model=model)
+
+
+def _ensure_news_coverage(
+    tickers: list[str],
+    news_dict: Optional[dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Ensure every required ticker has a news payload (sector fallback if missing).
+    """
+    out: dict[str, dict[str, Any]] = dict(news_dict or {})
+    try:
+        import market_data as md
+    except ImportError:
+        md = None  # type: ignore
+
+    for t in tickers:
+        if t in out and isinstance(out[t], dict):
+            # Backfill sector if older payloads omit it
+            if not out[t].get("sector") and md is not None:
+                out[t]["sector"] = md.get_ticker_sector(t)
+            if "needs_sector_fallback" not in out[t]:
+                out[t]["needs_sector_fallback"] = not bool(out[t].get("news"))
+            continue
+        if md is not None:
+            out[t] = {
+                "ticker": t,
+                "yahoo_ticker": f"{t}.IS",
+                "sector": md.get_ticker_sector(t),
+                "news": [],
+                "success": False,
+                "error": "Haber verisi eksik — sektör görünümü yazılmalı.",
+                "needs_sector_fallback": True,
+            }
+        else:
+            out[t] = {
+                "ticker": t,
+                "sector": "Genel Piyasa",
+                "news": [],
+                "success": False,
+                "error": "Haber verisi eksik — sektör görünümü yazılmalı.",
+                "needs_sector_fallback": True,
+            }
+    return out

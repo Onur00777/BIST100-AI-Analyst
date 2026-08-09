@@ -604,6 +604,32 @@ div[data-testid="stDataFrame"] * {
 .ai-card-body li { margin-bottom: 0.25rem; }
 .ai-card-body p { margin: 0.25rem 0; }
 .ai-card-body strong { color: #fff; }
+.ai-card-body table.md-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.55rem 0 0.75rem 0;
+    font-size: 0.78rem;
+    font-family: 'JetBrains Mono', 'Inter', monospace;
+}
+.ai-card-body table.md-table th,
+.ai-card-body table.md-table td {
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+    vertical-align: top;
+}
+.ai-card-body table.md-table th {
+    background: var(--bg-elevated);
+    color: #fff;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.ai-card-body table.md-table tr:nth-child(even) td {
+    background: rgba(37, 42, 55, 0.55);
+}
+.ai-card-body .verdict-good { color: var(--green); font-weight: 700; }
+.ai-card-body .verdict-risk { color: var(--amber); font-weight: 700; }
+.ai-card-body .verdict-bad { color: var(--red); font-weight: 700; }
 
 .empty-state {
     background: var(--bg-panel);
@@ -1025,25 +1051,107 @@ def render_tech_card(summary: dict) -> None:
 # AI report rendering (markdown -> structured alert cards)
 # ---------------------------------------------------------------------------
 def _inline_md(text: str) -> str:
-    """Minimal inline markdown -> HTML (bold / code / escape)."""
+    """Minimal inline markdown -> HTML (bold / code / escape + verdict tags)."""
     text = html.escape(text)
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    # Highlight mandatory verdict tags
+    text = re.sub(
+        r"\[ÇOK İYİ HAMLE\]",
+        r'<span class="verdict-good">[ÇOK İYİ HAMLE]</span>',
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\[RİSKLİ\s*/\s*NÖTR\]|\[RISKLI\s*/\s*NOTR\]",
+        r'<span class="verdict-risk">[RİSKLİ / NÖTR]</span>',
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\[HATALI\s*/\s*TEHLİKELİ\]|\[HATALI\s*/\s*TEHLIKELI\]",
+        r'<span class="verdict-bad">[HATALI / TEHLİKELİ]</span>',
+        text,
+        flags=re.I,
+    )
     return text
 
 
+def _split_md_row(line: str) -> list[str]:
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [c.strip() for c in raw.split("|")]
+
+
+def _is_md_separator(line: str) -> bool:
+    cells = _split_md_row(line)
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells if c != "")
+
+
+def _md_table_to_html(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    header = rows[0]
+    body = rows[1:]
+    thead = "".join(f"<th>{_inline_md(c)}</th>" for c in header)
+    trs = []
+    for r in body:
+        # Pad short rows to header width
+        padded = r + [""] * max(0, len(header) - len(r))
+        trs.append(
+            "<tr>" + "".join(f"<td>{_inline_md(c)}</td>" for c in padded[: len(header)]) + "</tr>"
+        )
+    return (
+        '<div style="overflow-x:auto">'
+        f'<table class="md-table"><thead><tr>{thead}</tr></thead>'
+        f"<tbody>{''.join(trs)}</tbody></table></div>"
+    )
+
+
 def _body_to_html(body: str) -> str:
-    """Convert a markdown body chunk into simple HTML lists/paragraphs."""
+    """Convert a markdown body chunk into HTML (lists, paragraphs, full tables)."""
     lines = body.strip().splitlines()
     parts: list[str] = []
     in_list = False
+    i = 0
 
-    for raw in lines:
+    def _close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            parts.append("</ul>")
+            in_list = False
+
+    while i < len(lines):
+        raw = lines[i]
         line = raw.rstrip()
+
+        # Markdown pipe table
+        if (
+            "|" in line
+            and i + 1 < len(lines)
+            and "|" in lines[i + 1]
+            and _is_md_separator(lines[i + 1])
+        ):
+            _close_list()
+            rows = [_split_md_row(line)]
+            i += 2
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                if _is_md_separator(lines[i]):
+                    i += 1
+                    continue
+                rows.append(_split_md_row(lines[i]))
+                i += 1
+            parts.append(_md_table_to_html(rows))
+            continue
+
         if not line.strip():
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            _close_list()
+            i += 1
             continue
 
         bullet = re.match(r"^[-*•]\s+(.*)$", line.strip())
@@ -1055,14 +1163,12 @@ def _body_to_html(body: str) -> str:
             content = bullet.group(1) if bullet else numbered.group(1)
             parts.append(f"<li>{_inline_md(content)}</li>")
         else:
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            _close_list()
             cleaned = re.sub(r"^#{1,6}\s*", "", line.strip())
             parts.append(f"<p>{_inline_md(cleaned)}</p>")
+        i += 1
 
-    if in_list:
-        parts.append("</ul>")
+    _close_list()
     return "\n".join(parts) if parts else f"<p>{_inline_md(body)}</p>"
 
 
@@ -1071,19 +1177,49 @@ def _classify_section(title: str) -> tuple[str, str]:
     t = title.lower()
     if any(k in t for k in ("haber", "sektörel", "sektorel", "news")):
         return "card-news", "📰"
-    if any(k in t for k in ("değişim puan", "degisim puan", "beklenen", "score", "puan")):
+    if any(
+        k in t
+        for k in (
+            "değişim puan",
+            "degisim puan",
+            "beklenen",
+            "score",
+            "puan",
+            "genel portföy",
+            "genel portfoy",
+            "kararı",
+            "karari",
+        )
+    ):
         return "card-score", "📊"
     if any(k in t for k in ("özet", "ozet", "summary", "günlük", "portföy", "portfoy")):
         return "card-summary", "📋"
     if any(k in t for k in ("disiplin", "discipline")):
         return "card-discipline", "✅"
-    if any(k in t for k in ("teknik", "işlem", "islem", "pozisyon", "yorum")):
+    if any(
+        k in t
+        for k in (
+            "isabet",
+            "hisse bazlı",
+            "hisse bazli",
+            "teknik",
+            "işlem",
+            "islem",
+            "pozisyon",
+            "yorum",
+            "değerlendirme",
+            "degerlendirme",
+        )
+    ):
         return "card-technical", "📈"
     if any(k in t for k in ("risk", "konsantrasyon", "concentration")):
         return "card-risk", "⚠️"
     if any(k in t for k in ("destek", "direnç", "direnc", "seviye", "yarın", "yarin")):
         return "card-levels", "🎯"
-    if any(k in t for k in ("strateji", "strategy", "motivasyon", "öneri", "oneri")):
+    if any(
+        k in t
+        for k in ("strateji", "strategy", "motivasyon", "öneri", "oneri", "reçete", "recete")
+    ):
         return "card-strategy", "💡"
     return "card-default", "📌"
 
@@ -1205,7 +1341,7 @@ def fetch_market_dict(tickers: list[str]) -> dict[str, dict]:
 
 
 def fetch_news_dict(tickers: list[str]) -> dict[str, dict]:
-    """Fetch cached news for tickers."""
+    """Fetch cached news for EVERY ticker (sector fallback when empty)."""
     result: dict[str, dict] = {}
     for t in tickers:
         bare = md.bare_ticker(t)
@@ -1215,16 +1351,38 @@ def fetch_news_dict(tickers: list[str]) -> dict[str, dict]:
 
 
 def _flatten_news(news_dict: dict[str, dict]) -> list[dict]:
-    """Flatten per-ticker news dict into a single list for the PDF."""
+    """
+    Flatten per-ticker news for the PDF.
+
+    Tickers with no headlines still get a sector placeholder row so the PDF
+    never silently drops a portfolio name from the news section.
+    """
     flat: list[dict] = []
     for ticker, payload in (news_dict or {}).items():
-        for item in (payload or {}).get("news") or []:
-            row = dict(item)
-            row["ticker"] = ticker
-            title = row.get("title") or ""
-            if ticker and ticker not in title:
-                row["title"] = f"[{ticker}] {title}"
-            flat.append(row)
+        sector = (payload or {}).get("sector") or md.get_ticker_sector(ticker)
+        items = (payload or {}).get("news") or []
+        if items:
+            for item in items:
+                row = dict(item)
+                row["ticker"] = ticker
+                row["sector"] = sector
+                title = row.get("title") or ""
+                if ticker and ticker not in title:
+                    row["title"] = f"[{ticker}] {title}"
+                flat.append(row)
+        else:
+            flat.append(
+                {
+                    "ticker": ticker,
+                    "sector": sector,
+                    "title": f"[{ticker}] Doğrudan haber yok — {sector} sektör görünümü",
+                    "publisher": "Sektör Notu",
+                    "summary": (payload or {}).get("error")
+                    or f"{ticker} için şirket haberi bulunamadı; sektör bağlamı kullanılmalı.",
+                    "link": "",
+                    "published": "",
+                }
+            )
     return flat
 
 
@@ -1645,6 +1803,22 @@ with tab3:
         if scope_label:
             st.caption(f"Kapsam: {scope_label}")
 
+        required_tickers = st.session_state.get("ai_report_tickers") or []
+        missing = ai_analyst.report_missing_tickers(
+            st.session_state["ai_report"], required_tickers
+        )
+        if missing:
+            st.warning(
+                "Rapor kapsam uyarısı — şu hisseler metinde net geçmiyor olabilir: "
+                + ", ".join(missing)
+                + ". Tekrar analiz etmeyi deneyin."
+            )
+        elif required_tickers:
+            st.caption(
+                f"Kapsam kontrolü: {len(required_tickers)} hisse raporda izlendi "
+                f"({', '.join(required_tickers)})."
+            )
+
         score_info = st.session_state.get("ai_score") or ai_analyst.parse_expected_score(
             st.session_state["ai_report"]
         )
@@ -1686,7 +1860,8 @@ with tab3:
     else:
         st.markdown(
             '<div class="empty-state">Kapsamı seçip <strong>Analiz Et &amp; Yorumla</strong> '
-            "butonuna tıklayın.<br/>Sonuç; 📰 Haber Özeti, 📊 Beklenen Değişim Puanı (-10…+10), "
-            "🎯 Destek/Direnç ve 💡 Strateji kartları + PDF indirme olarak gösterilir.</div>",
+            "butonuna tıklayın.<br/>Sonuç; 📊 Değişim Puanı, 🎯 Destek/Direnç tablosu "
+            "(tüm hisseler), 🔍 Hisse bazlı isabet etiketleri, 📰 Türkçe haber/sektör notları "
+            "ve 💡 Net strateji + PDF indirme olarak gösterilir.</div>",
             unsafe_allow_html=True,
         )

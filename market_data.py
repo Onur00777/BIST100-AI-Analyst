@@ -411,6 +411,123 @@ def get_summaries_for_tickers(tickers: list[str]) -> dict[str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Sector hints (used when a ticker has no direct headlines)
+# ---------------------------------------------------------------------------
+# Coarse BIST sector map — unknown tickers fall back to "Genel Piyasa".
+TICKER_SECTOR_MAP: dict[str, str] = {
+    "AEFES": "Gıda & İçecek",
+    "AKBNK": "Bankacılık",
+    "AKSA": "Kimya",
+    "AKSEN": "Enerji",
+    "ALARK": "Holding",
+    "ALCTL": "Teknoloji",
+    "ALTNY": "Savunma",
+    "ANSGR": "Sigorta",
+    "ARCLK": "Dayanıklı Tüketim",
+    "ASELS": "Savunma",
+    "ASTOR": "Enerji",
+    "BALSU": "Gıda & İçecek",
+    "BERA": "Holding",
+    "BIMAS": "Perakende",
+    "BRSAN": "Metal Ana",
+    "BRYAT": "Holding",
+    "BSOKE": "Çimento",
+    "BTCIM": "Çimento",
+    "CANTE": "Enerji",
+    "CCOLA": "Gıda & İçecek",
+    "CIMSA": "Çimento",
+    "CVKMD": "Madencilik",
+    "CWENE": "Enerji",
+    "DAPGM": "Gayrimenkul",
+    "DOAS": "Otomotiv",
+    "DOHOL": "Holding",
+    "DSTKF": "Finans",
+    "ECILC": "İlaç",
+    "EFOR": "Holding",
+    "EKGYO": "Gayrimenkul",
+    "ENERY": "Enerji",
+    "ENJSA": "Enerji",
+    "ENKAI": "İnşaat",
+    "EREGL": "Metal Ana",
+    "ESEN": "Enerji",
+    "EUPWR": "Enerji",
+    "EUREN": "Sanayi",
+    "FENER": "Spor",
+    "FROTO": "Otomotiv",
+    "GARAN": "Bankacılık",
+    "GENIL": "İlaç",
+    "GESAN": "Enerji",
+    "GLRMK": "İnşaat",
+    "GRSEL": "Ulaştırma",
+    "GRTHO": "Holding",
+    "GSRAY": "Spor",
+    "GUBRF": "Kimya / Gübre",
+    "HALKB": "Bankacılık",
+    "HEKTS": "Kimya / Tarım",
+    "IEYHO": "Enerji",
+    "ISCTR": "Bankacılık",
+    "ISMEN": "Finans",
+    "IZENR": "Enerji",
+    "KCHOL": "Holding",
+    "KLRHO": "Holding",
+    "KRDMD": "Metal Ana",
+    "KTLEV": "Finans",
+    "KUYAS": "Holding",
+    "MAGEN": "Enerji",
+    "MAVI": "Perakende",
+    "MGROS": "Perakende",
+    "MIATK": "Teknoloji",
+    "MPARK": "Sağlık",
+    "OBAMS": "Gıda & İçecek",
+    "ODAS": "Enerji",
+    "ODINE": "Teknoloji",
+    "OTKAR": "Otomotiv",
+    "OYAKC": "Çimento",
+    "PAHOL": "Holding",
+    "PASEU": "Ulaştırma",
+    "PATEK": "Teknoloji",
+    "PETKM": "Kimya / Petrokimya",
+    "PGSUS": "Ulaştırma",
+    "PSGYO": "Gayrimenkul",
+    "QUAGR": "Sanayi",
+    "RALYH": "Holding",
+    "REEDR": "Teknoloji",
+    "SAHOL": "Holding",
+    "SARKY": "Metal Ana",
+    "SASA": "Kimya",
+    "SISE": "Cam / Sanayi",
+    "SKBNK": "Bankacılık",
+    "SOKM": "Perakende",
+    "TAVHL": "Ulaştırma",
+    "TCELL": "Telekomünikasyon",
+    "THYAO": "Ulaştırma",
+    "TKFEN": "Holding / İnşaat",
+    "TOASO": "Otomotiv",
+    "TRALT": "Madencilik",
+    "TRENJ": "Enerji",
+    "TRMET": "Madencilik",
+    "TSKB": "Bankacılık",
+    "TTKOM": "Telekomünikasyon",
+    "TUKAS": "Gıda & İçecek",
+    "TUPRS": "Enerji / Rafineri",
+    "TURSG": "Sigorta",
+    "ULKER": "Gıda & İçecek",
+    "VAKBN": "Bankacılık",
+    "VESTL": "Dayanıklı Tüketim",
+    "YKBNK": "Bankacılık",
+    "ZOREN": "Enerji",
+}
+
+
+def get_ticker_sector(ticker: str) -> str:
+    """Return a coarse Turkish sector label for prompt / news fallbacks."""
+    bare = bare_ticker(ticker) if ticker else ""
+    if not bare:
+        return "Genel Piyasa"
+    return TICKER_SECTOR_MAP.get(bare, "Genel Piyasa")
+
+
+# ---------------------------------------------------------------------------
 # Sector / company news via yfinance
 # ---------------------------------------------------------------------------
 def _extract_news_item(raw: dict) -> Optional[dict[str, Any]]:
@@ -494,21 +611,27 @@ def get_stock_news(ticker: str, limit: int = 5) -> dict[str, Any]:
     """
     Fetch recent news headlines for a BIST ticker via yfinance.
 
+    Always returns a per-ticker payload (even when headlines are empty) so the
+    AI layer can fall back to a Turkish sector outlook for that stock.
+
     Returns:
         {
-          ticker, yahoo_ticker, news: [{title, publisher, summary, link, published}],
-          success, error
+          ticker, yahoo_ticker, sector, news: [...],
+          success, error, needs_sector_fallback
         }
     Never raises — empty news list on failure.
     """
     yahoo_ticker = format_bist_ticker(ticker)
     bare = yahoo_ticker[:-3] if yahoo_ticker.endswith(".IS") else yahoo_ticker
+    sector = get_ticker_sector(bare)
     result: dict[str, Any] = {
         "ticker": bare,
         "yahoo_ticker": yahoo_ticker,
+        "sector": sector,
         "news": [],
         "success": False,
         "error": None,
+        "needs_sector_fallback": True,
     }
 
     if not yahoo_ticker:
@@ -519,7 +642,10 @@ def get_stock_news(ticker: str, limit: int = 5) -> dict[str, Any]:
         stock = yf.Ticker(yahoo_ticker)
         raw_news = getattr(stock, "news", None) or []
         if not isinstance(raw_news, list) or not raw_news:
-            result["error"] = f"'{yahoo_ticker}' için haber bulunamadı."
+            result["error"] = (
+                f"'{bare}' için doğrudan haber yok — "
+                f"'{sector}' sektör görünümü yazılmalı."
+            )
             return result
 
         items: list[dict[str, Any]] = []
@@ -531,25 +657,38 @@ def get_stock_news(ticker: str, limit: int = 5) -> dict[str, Any]:
                 break
 
         if not items:
-            result["error"] = f"'{yahoo_ticker}' haberleri okunamadı."
+            result["error"] = (
+                f"'{bare}' haberleri okunamadı — "
+                f"'{sector}' sektör görünümü yazılmalı."
+            )
             return result
 
         result["news"] = items
         result["success"] = True
+        result["needs_sector_fallback"] = False
+        result["error"] = None
         return result
 
     except Exception as exc:  # noqa: BLE001
-        result["error"] = f"Haberler alınamadı ({yahoo_ticker}): {exc}"
+        result["error"] = (
+            f"Haberler alınamadı ({bare}): {exc} — "
+            f"'{sector}' sektör görünümü yazılmalı."
+        )
         return result
 
 
 def get_news_for_tickers(
     tickers: list[str], limit_per_ticker: int = 5
 ) -> dict[str, dict[str, Any]]:
-    """Batch-fetch news for multiple tickers; keyed by bare ticker."""
+    """
+    Batch-fetch news for EVERY ticker (no silent skips).
+
+    Each bare ticker gets its own payload so Gemini can cover the full list.
+    """
     out: dict[str, dict[str, Any]] = {}
     for t in tickers:
         bare = bare_ticker(t)
-        if bare and bare not in out:
-            out[bare] = get_stock_news(bare, limit=limit_per_ticker)
+        if not bare or bare in out:
+            continue
+        out[bare] = get_stock_news(bare, limit=limit_per_ticker)
     return out

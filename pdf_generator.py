@@ -174,16 +174,148 @@ def _p(text: Any, style: ParagraphStyle) -> Paragraph:
     return Paragraph(_esc(text), style)
 
 
-def _md_to_flowables(md_text: str, styles: dict) -> list:
-    """Very small Markdown → Paragraph converter for the AI report body."""
+def _inline_md(text: str) -> str:
+    """Escape + light bold conversion for Paragraph XML."""
+    body = _esc(text)
+    body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body)
+    return body.replace("`", "")
+
+
+def _split_md_row(line: str) -> list[str]:
+    """Split a Markdown table row into cells."""
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [c.strip() for c in raw.split("|")]
+
+
+def _is_md_separator(line: str) -> bool:
+    """True for Markdown table separator rows like |---|---|."""
+    cells = _split_md_row(line)
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells if c != "")
+
+
+def _parse_md_tables(md_text: str) -> tuple[str, list[list[list[str]]]]:
+    """
+    Extract Markdown pipe-tables from text.
+
+    Returns (text_with_placeholders, tables) where each table is a list of rows
+    (each row is a list of cell strings). Tables are replaced with
+    `[[MD_TABLE_N]]` markers so the body converter can reinject them.
+    """
+    if not md_text:
+        return "", []
+
+    lines = md_text.splitlines()
+    out_lines: list[str] = []
+    tables: list[list[list[str]]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if (
+            "|" in line
+            and i + 1 < len(lines)
+            and "|" in lines[i + 1]
+            and _is_md_separator(lines[i + 1])
+        ):
+            header = _split_md_row(line)
+            i += 2  # skip header + separator
+            rows: list[list[str]] = [header]
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                if _is_md_separator(lines[i]):
+                    i += 1
+                    continue
+                rows.append(_split_md_row(lines[i]))
+                i += 1
+            tables.append(rows)
+            out_lines.append(f"[[MD_TABLE_{len(tables) - 1}]]")
+            continue
+        out_lines.append(line)
+        i += 1
+    return "\n".join(out_lines), tables
+
+
+def _md_table_flowable(
+    rows: list[list[str]],
+    styles: dict,
+    font_r: str,
+) -> Table:
+    """Build a ReportLab Table from parsed Markdown rows — no row clipping."""
+    if not rows:
+        return Table([[_p("—", styles["cell"])]])
+
+    col_count = max(len(r) for r in rows)
+    # Normalize ragged rows
+    normalized = [r + [""] * (col_count - len(r)) for r in rows]
+
+    header = normalized[0]
+    body = normalized[1:] if len(normalized) > 1 else []
+
+    data = [_table_row(header, styles["cell_header"])]
+    for r in body:
+        data.append(_table_row(r, styles["cell"]))
+
+    # Dynamic column widths that fit A4 usable width (~178mm)
+    usable = 178 * mm
+    # Prefer wider last column for "Aksiyon / Tavsiye"
+    if col_count >= 7:
+        widths = [22 * mm, 20 * mm, 18 * mm, 18 * mm, 18 * mm, 18 * mm]
+        widths.append(usable - sum(widths))
+    else:
+        base = usable / max(col_count, 1)
+        widths = [base] * col_count
+
+    table = Table(data, colWidths=widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e222d")),
+                ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+                ("FONTNAME", (0, 0), (-1, -1), font_r),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [colors.white, colors.HexColor("#f1f5f9")],
+                ),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    return table
+
+
+def _md_to_flowables(md_text: str, styles: dict, font_r: str = "Helvetica") -> list:
+    """Markdown → Paragraph/Table converter (headings, bullets, full tables)."""
     flow: list = []
     if not md_text:
         return flow
 
-    for raw in md_text.splitlines():
+    cleaned, tables = _parse_md_tables(md_text)
+
+    for raw in cleaned.splitlines():
         line = raw.rstrip()
         if not line.strip():
             flow.append(Spacer(1, 3))
+            continue
+
+        # Reinjection marker for extracted Markdown tables
+        marker = re.fullmatch(r"\[\[MD_TABLE_(\d+)\]\]", line.strip())
+        if marker:
+            idx = int(marker.group(1))
+            if 0 <= idx < len(tables):
+                flow.append(_md_table_flowable(tables[idx], styles, font_r))
+                flow.append(Spacer(1, 6))
             continue
 
         # Skip machine SCORE line in body (shown separately)
@@ -199,14 +331,10 @@ def _md_to_flowables(md_text: str, styles: dict) -> list:
 
         bullet = re.match(r"^[-*•]\s+(.*)$", line.strip())
         if bullet:
-            body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _esc(bullet.group(1)))
-            # reportlab <b> uses the bold face of the same font family when registered
-            flow.append(Paragraph(f"• {body}", styles["body"]))
+            flow.append(Paragraph(f"• {_inline_md(bullet.group(1))}", styles["body"]))
             continue
 
-        body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _esc(line.strip()))
-        body = body.replace("`", "")
-        flow.append(Paragraph(body, styles["body"]))
+        flow.append(Paragraph(_inline_md(line.strip()), styles["body"]))
 
     return flow
 
@@ -377,7 +505,7 @@ def generate_pdf_report(
             story.append(Paragraph(f"• {_esc(r)}", styles["body"]))
         story.append(Spacer(1, 6))
 
-    # --- Technical metrics table ---
+    # --- Technical metrics table (ALL tickers, no clipping) ---
     metrics = metrics or {}
     metric_rows = [
         _table_row(
@@ -406,13 +534,14 @@ def generate_pdf_report(
     if metrics.get("ticker") or metrics.get("current_price") is not None:
         _add_metric_row(metrics.get("ticker") or ticker, metrics)
     else:
+        # Preserve insertion order — every portfolio ticker must appear
         for tkr, m in metrics.items():
             if isinstance(m, dict):
                 _add_metric_row(tkr, m)
 
     if len(metric_rows) > 1:
-        story.append(Paragraph("Teknik Göstergeler", styles["h2"]))
-        table = Table(metric_rows, colWidths=[70, 70, 70, 55, 70, 70])
+        story.append(Paragraph("Teknik Göstergeler (Tam Liste)", styles["h2"]))
+        table = Table(metric_rows, colWidths=[70, 70, 70, 55, 70, 70], repeatRows=1)
         table.setStyle(
             TableStyle(
                 [
@@ -455,12 +584,12 @@ def generate_pdf_report(
                         str(t.get("action", "")),
                         _fmt(t.get("quantity")),
                         _fmt(t.get("price")),
-                        str(t.get("notes", "") or "")[:40],
+                        str(t.get("notes", "") or "")[:80],
                     ],
                     styles["cell"],
                 )
             )
-        ttable = Table(trade_rows, colWidths=[65, 55, 45, 50, 60, 120])
+        ttable = Table(trade_rows, colWidths=[65, 55, 45, 50, 60, 120], repeatRows=1)
         ttable.setStyle(
             TableStyle(
                 [
@@ -483,22 +612,33 @@ def generate_pdf_report(
         story.append(ttable)
         story.append(Spacer(1, 8))
 
-    # --- News ---
+    # --- News (ALL tickers — no artificial 8-item cap) ---
     if news:
-        story.append(Paragraph("Sektörel & Şirket Haberleri", styles["h2"]))
-        for n in news[:8]:
+        story.append(Paragraph("Sektörel & Şirket Haberleri (Tam Liste)", styles["h2"]))
+        for n in news:
             title = n.get("title") or ""
             publisher = n.get("publisher") or ""
             summary = n.get("summary") or ""
+            tkr = n.get("ticker") or ""
+            sector = n.get("sector") or ""
             head = title if not publisher else f"{title} ({publisher})"
+            if tkr and f"[{tkr}]" not in head:
+                head = f"[{tkr}] {head}"
             story.append(Paragraph(f"• <b>{_esc(head)}</b>", styles["body"]))
             if summary:
-                story.append(Paragraph(_esc(summary[:280]), styles["body"]))
+                story.append(Paragraph(_esc(summary[:400]), styles["body"]))
+            elif sector:
+                story.append(
+                    Paragraph(
+                        _esc(f"{tkr} — {sector} sektörü: doğrudan haber yok (sektör notu)."),
+                        styles["body"],
+                    )
+                )
         story.append(Spacer(1, 6))
 
-    # --- AI analysis body ---
+    # --- AI analysis body (includes Destek & Direnç Markdown tables as real tables) ---
     story.append(Paragraph("Gemini AI Analiz Raporu", styles["h2"]))
-    story.extend(_md_to_flowables(ai_report_text or "", styles))
+    story.extend(_md_to_flowables(ai_report_text or "", styles, font_r=font_r))
 
     story.append(Spacer(1, 12))
     story.append(
