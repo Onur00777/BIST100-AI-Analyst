@@ -1350,6 +1350,43 @@ def fetch_news_dict(tickers: list[str]) -> dict[str, dict]:
     return result
 
 
+def clear_market_data_caches() -> None:
+    """Drop cached Yahoo/BIST snapshots so the next render fetches fresh quotes."""
+    cached_stock_summary.clear()
+    cached_bist100.clear()
+    cached_stock_news.clear()
+
+
+def render_market_refresh_bar() -> None:
+    """
+    Compact toolbar under the KPI row: refresh market caches + last-refresh time.
+
+    Quotes are cached for 5 minutes; this lets the user force a live pull without
+    restarting the app.
+    """
+    if "market_last_refresh" not in st.session_state:
+        st.session_state["market_last_refresh"] = datetime.now()
+
+    left, right = st.columns([3.2, 1])
+    with left:
+        stamp = st.session_state["market_last_refresh"].strftime("%H:%M:%S")
+        st.caption(
+            f"Piyasa önbelleği · son yenileme {stamp} · "
+            "otomatik TTL 5 dk (Yahoo rate-limit koruması)"
+        )
+    with right:
+        if st.button(
+            "🔄 Verileri Yenile",
+            key="btn_refresh_market",
+            use_container_width=True,
+            help="BIST 100 ve hisse özet önbelleğini temizleyip taze veri çeker.",
+        ):
+            clear_market_data_caches()
+            st.session_state["market_last_refresh"] = datetime.now()
+            st.toast("Piyasa verileri yenilendi.", icon="📈")
+            st.rerun()
+
+
 def _flatten_news(news_dict: dict[str, dict]) -> list[dict]:
     """
     Flatten per-ticker news for the PDF.
@@ -1524,6 +1561,7 @@ todays_trades = db.get_todays_trades()
 active_positions = db.count_active_positions()
 bist = cached_bist100()
 render_kpi_row(len(todays_trades), active_positions, bist)
+render_market_refresh_bar()
 
 # ---------------------------------------------------------------------------
 # Tabs
